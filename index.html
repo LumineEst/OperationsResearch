@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Production Schedule Optimizer</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <header class="main-header">
+            <h1>Production Schedule Optimizer</h1>
+            <div class="header-controls">
+                <input type="file" id="excelInput" class="hidden-file-input" accept=".xlsx, .xls">
+                <button class="btn btn-primary" onclick="document.getElementById('excelInput').click()">Import Excel</button>
+                <button class="btn btn-accent" id="runSolverBtn">Run Optimization</button>
+                <button class="btn btn-secondary" id="exportBtn">Export Results</button>
+            </div>
+        </header>
+
+        <div class="main-body">
+            <aside class="sidebar left-sidebar" id="left-sidebar">
+                <div class="sidebar-header">
+                    <h2>Global Parameters</h2>
+                </div>
+                <div class="sidebar-content">
+                    <div class="input-group">
+                        <label><strong>Raw Steel Cost</strong> ($/ton)</label>
+                        <input type="number" id="rawSteelCost" value="2000" step="50">
+                    </div>
+                    <div class="input-group">
+                        <label><strong>Inventory Cost</strong> ($/ton/day)</label>
+                        <input type="number" id="invCost" value="20" step="1">
+                    </div>
+                    <div class="input-group">
+                        <label><strong>Max Capacity</strong> (tons/day)</label>
+                        <input type="number" id="maxCapacity" value="500" step="10">
+                    </div>
+                    <div class="input-group">
+                        <label><strong>Backorder Penalty</strong> (%)</label>
+                        <input type="number" id="backorderPenalty" value="2" step="0.1">
+                    </div>
+                </div>
+            </aside>
+
+            <main class="content-area">
+                <div class="tabs" id="tabs">
+                    <button class="tab-btn active" data-tab="charts">Production Schedule</button>
+                    <button class="tab-btn" data-tab="data">Product Demands</button>
+                </div>
+
+                <div id="charts-panel" class="vis-panel active">
+                    <div class="chart-wrapper">
+                        <h3>Daily Production Utilization</h3>
+                        <div id="productionChartContainer" class="d3-container"></div>
+                    </div>
+                    <div class="chart-wrapper">
+                        <h3>Inventory vs Backorders</h3>
+                        <div id="inventoryChartContainer" class="d3-container"></div>
+                    </div>
+                </div>
+
+                <div id="data-panel" class="vis-panel">
+                    <div class="table-container">
+                        <table id="inputTable">
+                            <thead>
+                                <tr>
+                                    <th>Product</th>
+                                    <th>Sell Price</th>
+                                    <th>Mfg Cost</th>
+                                    <th>Mon</th>
+                                    <th>Tue</th>
+                                    <th>Wed</th>
+                                    <th>Thu</th>
+                                    <th>Fri</th>
+                                    <th>Sat</th>
+                                    <th>Sun</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tableBody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+
+            <aside class="sidebar right-sidebar" id="right-sidebar">
+                <div class="sidebar-header">
+                    <h2>Results Summary</h2>
+                </div>
+                <div class="sidebar-content">
+                    <div class="kpi-card">
+                        <span class="kpi-label">Total Profit</span>
+                        <span class="kpi-value" id="objValueDisplay">$0.00</span>
+                    </div>
+                    <div class="kpi-group">
+                        <h4>Status</h4>
+                        <div id="statusIndicator" class="status-badge ready">Ready to Solve</div>
+                    </div>
+
+                    <div class="kpi-group" id="detailedMetrics">
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
