@@ -125,10 +125,8 @@ function executeSolve() {
             if (els.autoSaveStatus) els.autoSaveStatus.textContent = "Up to date";
         } else {
             // Handle logical errors (Infeasible)
-            const msg = error || "Unknown Error";
-            updateStatus("Solver Error", "error");
-            if (els.autoSaveStatus) els.autoSaveStatus.textContent = msg;
-            console.warn("Solver returned:", msg);
+            updateStatus("Infeasible", "error");
+            if (els.autoSaveStatus) els.autoSaveStatus.textContent = "No Optimal Solution Found";
         }
 
         // Terminate Idle Worker to release allocated browser memory resources

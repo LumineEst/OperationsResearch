@@ -9,15 +9,54 @@
  * @author Joel Wood
  */
 let highsLoaderFunction = null;
+let highsScriptLoaded = false;
+let highsScriptError = null;
+let highsInstancePromise = null;
 
 // Initialize Highs Script
 try {
     importScripts('libs/highs.js');
     if (typeof Module === 'function') {
         highsLoaderFunction = Module;
+        highsScriptLoaded = true;
     }
 } catch (error) {
-    console.error("WORKER: Failed to import scripts:", error);
+    highsScriptError = `Failed to import script 'libs/highsInstancePromise.js': ${error.message}`;
+    console.error("WORKER: -", highsScriptError, error);
+}
+
+// --- Async Solver Loader (Singleton Pattern) ---
+async function getSolverInstance() {
+    if (!highsScriptLoaded || !highsLoaderFunction) {
+        throw new Error(highsScriptError || "HiGHS script did not load or define loader.");
+    }
+
+    // Create the instance only once
+    if (!highsInstancePromise) {
+        const wasmPath = 'libs/';
+
+        // Allocates 512MB Fixed Memory
+        const memoryMB = 512;
+        const initialMemory = memoryMB * 1024 * 1024;
+
+        highsInstancePromise = highsLoaderFunction({
+            locateFile: (filename) => wasmPath + filename,
+            initialMemory: initialMemory
+            // Note: 'allowMemoryGrowth' is intentionally OMITTED to match reference stability
+        })
+            .then(instance => {
+                if (!instance?.solve) {
+                    throw new Error("HiGHS instance invalid or missing 'solve' method.");
+                }
+                return instance;
+            })
+            .catch(err => {
+                console.error("WORKER: Failed to initialize HiGHS WASM instance:", err);
+                highsInstancePromise = null;
+                throw err;
+            });
+    }
+    return highsInstancePromise;
 }
 
 /**
@@ -67,11 +106,13 @@ async function solveSteelProductionLP(params) {
     let totalSetupHours = 0;
     let totalCycleHours = 0;
     let activeProducts = [];
+    let totalDemandTons = 0;
     const safeCapacity = maxCapacity > 0 ? maxCapacity : 1; // Prevent Division by 0
 
     for (let p of products) {
         const totalDemand = (p.demand || []).reduce((a, b) => a + clean(b), 0);
         if (totalDemand > 0) {
+            totalDemandTons += p.demand;
             // Setup Time: Minutes -> Hours
             const singleSetupHrs = clean(p.changeOverTime) / 60;
             // Minimum setups based on weekly supply demand, by daily supply constraint
@@ -96,22 +137,22 @@ async function solveSteelProductionLP(params) {
         };
     }
 
+    // Check for Material Capacity
+    if (totalDemandTons > (maxCapacity * 7)) {
+        return {
+            status: 'Infeasible',
+            error: 'Capacity Exceeded: Demand is ${totalDemandHours} tons, but max weekly capacity is ${totalWeeklyCapacity} tons.'
+        };
+    }
+
     // ------------------------------------------------------------------------
     // INITIALIZE SOLVER
     // ------------------------------------------------------------------------
     let solverInstance;
     try {
-        if (!highsLoaderFunction) throw new Error("HiGHS loader not initialized.");
-
-        // Allocating 512 MB Starting Memory for Solver
-        solverInstance = await highsLoaderFunction({
-            locateFile: (file) => 'libs/' + file,
-            initialMemory: 512 * 1024 * 1024,
-            allowMemoryGrowth: true
-        });
-
+        solverInstance = await getSolverInstance();
     } catch (error) {
-        return { status: 'Error', error: "Solver Init Failed: " + error.message };
+        return { status: 'Error', error: "Solver Load Failed: " + error.message };
     }
 
     // ------------------------------------------------------------------------
