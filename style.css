@@ -1,3 +1,5 @@
+/* --- General Styling for script.js --- */
+
 :root {
     --primary: #2c3e50;
     --secondary: #34495e;
@@ -53,17 +55,26 @@ body {
     font-size: 1.25rem;
 }
 
-.header-controls {
-    display: flex;
-    gap: var(--spacing-sm);
-}
-
 .main-body {
     display: flex;
     flex: 1;
     overflow: hidden;
 }
 
+.hidden-file-input {
+    display: none;
+}
+
+.content-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background-color: #f4f6f7;
+    position: relative;
+    overflow: hidden;
+}
+
+/* --- Sidebars --- */
 .sidebar {
     width: var(--sidebar-width);
     background-color: white;
@@ -113,6 +124,7 @@ body {
     font-size: 0.9rem;
 }
 
+/* --- Buttons --- */
 .btn {
     padding: 0.375rem 0.75rem;
     border: none;
@@ -149,19 +161,7 @@ body {
     background-color: #7f8c8d;
 }
 
-.hidden-file-input {
-    display: none;
-}
-
-.content-area {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    background-color: #f4f6f7;
-    position: relative;
-    overflow: hidden;
-}
-
+/* --- Tabs --- */
 .tabs {
     background-color: white;
     border-bottom: 1px solid var(--border-color);
@@ -203,11 +203,19 @@ body {
     display: block;
 }
 
+/* --- Data Table --- */
+
 .table-container {
     background: white;
     border: 1px solid var(--border-color);
     border-radius: 0.25rem;
     overflow: auto;
+}
+
+.panel-controls {
+    margin-bottom: 1rem;
+    display: flex;
+    gap: 1rem;
 }
 
 table {
@@ -220,7 +228,7 @@ th,
 td {
     padding: 0.75rem;
     border: 1px solid var(--border-color);
-    text-align: left;
+    text-align: center;
 }
 
 th {
@@ -243,13 +251,17 @@ td input:focus {
     background: white;
 }
 
-#sharedLegend {
+/* --- Charts --- */
+
+.d3-container {
+    flex: 1;
     width: 100%;
-    height: 2.5rem;
-    margin-bottom: var(--spacing-sm);
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    position: relative;
+}
+
+svg text {
+    font-size: 0.75rem;
+    fill: #555;
 }
 
 .chart-wrapper {
@@ -264,24 +276,13 @@ td input:focus {
     height: 40vh;
 }
 
-.d3-container {
-    flex: 1;
+#sharedLegend {
     width: 100%;
-    position: relative;
-}
-
-svg {
-    font-family: inherit;
-}
-
-svg text {
-    font-size: 0.75rem;
-    fill: #555;
-}
-
-svg .axis-label {
-    font-size: 0.85rem;
-    font-weight: bold;
+    height: 2.5rem;
+    margin-bottom: var(--spacing-sm);
+    display: flex;
+    justify-content: center;
+    align-items: center;
 }
 
 .capacity-line {
@@ -295,6 +296,7 @@ svg .axis-label {
     stroke-width: 0.3rem;
 }
 
+/* --- Tooltips --- */
 .d3-tooltip {
     position: absolute;
     padding: 0.5rem 0.75rem;
