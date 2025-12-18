@@ -2,9 +2,9 @@
  * ============================================================================
  * Production Scheduler - Main Controller
  * ============================================================================
- * * Description:
+ * Description:
  * This script handles the User Interface (UI), State Management, and Worker
- * Orchestration for the Steel Production Optimization application.
+ * Initialization for the Steel Production Optimization application.
  * @author Joel Wood
  */
 
@@ -12,13 +12,13 @@
 // GLOBAL CONSTANTS & STATE MANAGEMENT
 // ============================================================================
 
-// Default line if data/SampleData.xlsx fails to load
+// Default product row if data/SampleData.xlsx fails to load
 const DEFAULT_PRODUCTS = [
     { id: 0, name: " ", sell: 0, cost: 0, changeOverCost: 0, changeOverTime: 0, cycleTime: 0, demand: [0, 0, 0, 0, 0, 0, 0] }
 ];
 
 /**
- * State Management Object
+ * State Management Object - Used for Central Variable Control, to help ensure data consistency.
  * @property {Array<number>} operationalTime - Array representing available operational hours per day of the week
  * @property {Array<Object>} products - List of product objects with costs/demands, managed through JSON
  * @property {Object|null} results - Stores outputs from the MILP optimization engine (worker.js)
@@ -40,7 +40,7 @@ let liveState = {
 };
 
 /**
- * Cached DOM elements
+ * Cached UI DOM elements
  */
 const els = {
     rawSteelCost: document.getElementById('rawSteelCost'),
@@ -92,68 +92,110 @@ function main() {
 }
 
 /**
- * Requests an optimization run Implementing a 250ms debounce after user input
- * before triggering the solver to prevent redundant calculations.
+ * HEURISTIC MINIMUMS
+ * Calculates the absolute floor for Capacity and Operational Time.
+ * This is to prevent optimization of impossible scenarios.
+ */
+function calculateTheoreticalFloor(params) {
+    // Initialize Operational Totals
+    const days = 7;
+    let totalDemand = 0;
+    let totalProcTime = 0;
+
+    params.products.forEach(p => {
+        const d = p.demand.reduce((a, b) => a + (parseFloat(b) || 0), 0);
+        totalDemand += d; // Find total weekly demand for each Product
+        totalProcTime += d * (parseFloat(p.cycleTime) || 0); // total processing time
+        if (d > 0) {
+            // Calculate minimum theoretical setups as Ceiling (Total Demand % Daily Capacity)
+            const minSetups = Math.max(1, Math.ceil(d / params.maxCapacity));
+            // Calculate maximum available Production Time per Product
+            totalProcTime += (minSetups * (parseFloat(p.changeOverTime) || 0) * 60);
+        }
+    });
+
+    // Return absolute feasibility limits
+    return {
+        floorCap: totalDemand / days,
+        floorTime: totalProcTime / (days * 3600) // Hours per day
+    };
+}
+
+/**
+ * Requests an optimization run Implementing a 100ms debounce after user input
+ * before triggering the solver to prevent redundant calculations and race conditions.
  */
 function requestSolve() {
     if (solveTimer) clearTimeout(solveTimer);
     updateStatus("Changes Pending...", "waiting");
-    solveTimer = setTimeout(() => { executeSolve(); }, 250);
+    solveTimer = setTimeout(() => { executeSolve(); }, 100);
 }
 
 /**
- * Executes the optimization strategy.
+ * Executes targetted heuristic guided MILP optimization.
  */
-function executeSolve() {
-
-    // To prevent memory corruption, initalize a new instance of Worker.
-    if (currentWorker) {
-        currentWorker.terminate();
-        currentWorker = null;
-    }
-    updateStatus("Solving...", "solving");
-    currentWorker = new Worker('worker.js');
-
-    // Setup Result Handlers
-    currentWorker.onmessage = function (e) {
-        const { type, status, result, error } = e.data;
-
-        if (type === 'result' && status === 'Optimal') {
-            systemState.results = result;
-            updateResultsUI();
-            updateStatus("Optimal Solution", "optimal");
-            if (els.autoSaveStatus) els.autoSaveStatus.textContent = "Up to date";
-        } else {
-            // Handle logical errors (Infeasible)
-            updateStatus("Infeasible", "error");
-            if (els.autoSaveStatus) els.autoSaveStatus.textContent = "No Optimal Solution Found";
-        }
-
-        // Terminate Idle Worker to release allocated browser memory resources
-        if (currentWorker) {
-            currentWorker.terminate();
-            currentWorker = null;
-        }
-    };
-
-    // Handle Worker Crash/Runtime Errors
-    currentWorker.onerror = function (e) {
-        console.error("Worker Crash:", e);
-        updateStatus("Worker Crashed", "error");
-        if (els.autoSaveStatus) els.autoSaveStatus.textContent = "Critical Solver Failure";
-    };
-
-    // Serialize and Send Data to Worker Function (worker.js)
-    const payload = {
+function executeSolve(attempt = 1, adjustedParams = null) {
+    const currentParams = adjustedParams || {
         products: JSON.parse(JSON.stringify(systemState.products)),
         operationalTime: [...systemState.operationalTime],
         ...liveState
     };
-    currentWorker.postMessage({ type: 'solve', data: payload });
+
+    // 1. Run Heuristic Check for if the Inputs are individually possible
+    const floors = calculateTheoreticalFloor(currentParams);
+    const avgOpTime = currentParams.operationalTime.reduce((a, b) => a + (parseFloat(b) || 0), 0) / 7;
+    // Check if the Max
+    if (currentParams.maxCapacity < floors.floorCap || avgOpTime < floors.floorTime) {
+        updateStatus("Impossible Logic", "error");
+        if (els.autoSaveStatus) els.autoSaveStatus.textContent = "Inputs below theoretical minimums.";
+        return;
+    }
+
+    // 2. Initialize Worker & Set Status
+    if (currentWorker) { currentWorker.terminate(); currentWorker = null; }
+    if (attempt === 1) updateStatus("Solving...", "solving");
+    currentWorker = new Worker('worker.js');
+
+    currentWorker.onmessage = function (e) {
+        const { type, status, result, slackUsed } = e.data;
+        // If the worker returns Optimal and didn't use Slack, return Optimal
+        const isOptimal = (status === 'Optimal' && (!slackUsed || slackUsed < 0.01));
+
+        // If Optimal, set UI elements to the results
+        if (type === 'result' && isOptimal) {
+            systemState.results = result;
+            updateResultsUI();
+            updateStatus("Optimal Solution", "optimal");
+        }
+
+        /**
+        * If the first attempt fails, it may not actually be infeasible, but rather due to getting stuck
+        * computationally in a loop.  To resolve this, we will do a second attempt using the midpoint of
+        * the current capacity, and the theoretical minimal capacity.  This will be a more aggressive
+        * constraint which may actually be more computationally stable, the optimal solution of a more
+        * aggressive constraint will be a valid answer to a more lax constraint.
+        */
+        else if (attempt === 1) {
+            console.warn("Attempt 1 Unstable. Retrying with Midpoint Capacity...");
+            const tightenedParams = {
+                ...currentParams,
+                maxCapacity: (currentParams.maxCapacity + floors.floorCap) / 2
+            };
+            executeSolve(2, tightenedParams);
+        }
+        // If both fail, then the solver will find the scenario to be infeasible.
+        // A feasible solution may exist, but is outside the computational ability of a web-browser.
+        else {
+            updateStatus("Infeasible", "error");
+        }
+    };
+
+    currentWorker.onerror = () => { if (attempt === 1) executeSolve(2); else updateStatus("Crash", "error"); };
+    currentWorker.postMessage({ type: 'solve', data: currentParams });
 }
 
 /**
- * Helper to update the visual status badge in Right Sidebar.
+ * Helper to update the visual status badge in Right Sidebar (Showing the Status of the Solver).
  * @param {string} text - Display text
  * @param {string} className - CSS class for color styling
  */
@@ -189,11 +231,11 @@ function handleInputChange(key, value) {
 
 /**
  * Updates a specific field for a specific product in Product Demands Table.
- * @param {number} idx - Product Array Index
- * @param {string} field - Property Name
- * @param {string} val - New Value
  */
 function updateProductData(idx, field, val) {
+    // If user changes cycle/changeover time, the bottleneck is 'time'
+    if (field.toLowerCase().includes('time')) {
+    }
     if (field === 'name') systemState.products[idx].name = val;
     else systemState.products[idx][field] = parseFloat(val) || 0;
     requestSolve();
@@ -421,6 +463,9 @@ function drawCharts() {
     drawInventoryChart();
 }
 
+/**
+ * Drawing Flexible Product Legend between the Charts
+ */
 function drawSharedLegend() {
     const container = document.getElementById('sharedLegend');
     if (!container) return;
@@ -428,7 +473,7 @@ function drawSharedLegend() {
 
     // Apply styles for dynamic wrapping
     Object.assign(container.style, {
-        height: 'auto', 
+        height: 'auto',
         minHeight: '2.5rem',
         display: 'flex',
         flexWrap: 'wrap',
@@ -445,6 +490,7 @@ function drawSharedLegend() {
     const products = systemState.results.details.map(d => d.product);
     const color = d3.scaleOrdinal().domain(products).range(d3.schemeCategory10);
 
+    // Setting Styling for the Product Groups
     products.forEach(product => {
         const item = document.createElement('div');
         Object.assign(item.style, {
@@ -472,6 +518,7 @@ function drawSharedLegend() {
             fontWeight: '500'
         });
 
+        // Unifying Boxes and Texts into Legend Items
         item.appendChild(box);
         item.appendChild(text);
         container.appendChild(item);

@@ -1,325 +1,233 @@
 /**
- * ============================================================================
- * Highs Solver Worker - MILP Engine
- * ============================================================================
+ * ==============================================================================
+ * Highs Solver Worker - MILP Optimization for Steel Production (Memory-Hardened)
+ * ==============================================================================
  * * Description:
  * This Web Worker handles the mathematical optimization of a production schedule.
  * It uses the HiGHS solver (via WebAssembly) to solve a Mixed-Integer Linear
- * Programming (MILP) problem.
+ * Programming (MILP) problem.  Using CPLEX Formatting:
+ * http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
  * @author Joel Wood
  */
-let highsLoaderFunction = null;
-let highsScriptLoaded = false;
-let highsScriptError = null;
-let highsInstancePromise = null;
 
-// Initialize Highs Script
+// Worker State Variables
+let highsModulePromise = null;
+let highsModule = null;
+
+/** Initialize Highs Module:
+ *  Attempts to load the WebAssembly solver from libs/highs.js
+ *  512MB is allocated as a safe compatability buffer, and to avoid memory overflow.
+ */
 try {
     importScripts('libs/highs.js');
     if (typeof Module === 'function') {
-        highsLoaderFunction = Module;
-        highsScriptLoaded = true;
+        highsModulePromise = Module({
+            locateFile: (file) => 'libs/' + file,
+            initialMemory: 512 * 1024 * 1024,
+        }).then(instance => {
+            highsModule = instance;
+            return instance;
+        });
     }
 } catch (error) {
-    highsScriptError = `Failed to import script 'libs/highsInstancePromise.js': ${error.message}`;
-    console.error("WORKER: -", highsScriptError, error);
-}
-
-// --- Async Solver Loader (Singleton Pattern) ---
-async function getSolverInstance() {
-    if (!highsScriptLoaded || !highsLoaderFunction) {
-        throw new Error(highsScriptError || "HiGHS script did not load or define loader.");
-    }
-
-    // Create the instance only once
-    if (!highsInstancePromise) {
-        const wasmPath = 'libs/';
-
-        // Allocates 512MB Fixed Memory
-        const memoryMB = 512;
-        const initialMemory = memoryMB * 1024 * 1024;
-
-        highsInstancePromise = highsLoaderFunction({
-            locateFile: (filename) => wasmPath + filename,
-            initialMemory: initialMemory
-            // Note: 'allowMemoryGrowth' is intentionally OMITTED to match reference stability
-        })
-            .then(instance => {
-                if (!instance?.solve) {
-                    throw new Error("HiGHS instance invalid or missing 'solve' method.");
-                }
-                return instance;
-            })
-            .catch(err => {
-                console.error("WORKER: Failed to initialize HiGHS WASM instance:", err);
-                highsInstancePromise = null;
-                throw err;
-            });
-    }
-    return highsInstancePromise;
+    console.error("WORKER: WASM Load Error:", error);
 }
 
 /**
- * Helper: Formats numbers to prevent invalid formatting, for the LP string.
- * @param {number} num
- * @returns {string}
+ * Numeric Formatter:
+ * Converts numbers to a string format compatible with the CPLEX/LP file format.
+ * Trims excess precision to prevent the LP string from becoming unnecessarily massive.
+ * This trim of excess characters is necessary to mitigate excessive string memory usage.
+ * It also helps mitigate "Ill-Conditioned" matricies which appear when coefficients have
+ * vastly different scales.
  */
 function fmt(num) {
-    if (!Number.isFinite(num)) return "0";
-    const s = num.toFixed(6);
-    return s === "-0.000000" ? "0" : s;
+    const n = parseFloat(num);
+    if (!Number.isFinite(n) || Math.abs(n) < 1e-7) return "0";
+    return n.toFixed(6).replace(/\.?0+$/, "");
 }
 
-/**
- * Main Solver Logic.
- * 1. Cleans inputs.
- * 2. Checks mathematical feasibility.
- * 3. Builds the Linear Program.
- * 4. Runs the Solver.
- * 5. Parses results.
- * * @param {Object} params - The system state object.
- */
+// ------------------------------------------------------------------------
+// BUILD LP STRING
+// ------------------------------------------------------------------------
 async function solveSteelProductionLP(params) {
+    // Safety Check for Highs Module being loaded
+    if (!highsModule) {
+        if (!highsModulePromise) return { status: 'Error', error: "Solver loader not found." };
+        await highsModulePromise;
+    }
 
-    // Helper for cleaning numeric values (type safety)
-    const clean = (val) => {
-        const n = parseFloat(val);
-        return Number.isFinite(n) ? n : 0;
-    };
-
-    // Deconstruct Operational Parameters
-    const products = params.products || [];
-    const rawSteelCost = clean(params.rawSteelCost);
-    const invCost = clean(params.invCost);
-    const maxCapacity = clean(params.maxCapacity);
-    const backorderPenalty = clean(params.backorderPenalty);
-    const operationalTime = (params.operationalTime || []).map(clean);
+    // Opertional Parameters
+    const { products, rawSteelCost, invCost, maxCapacity, backorderPenalty, operationalTime } = params;
     const daysCount = 7;
     const productCount = products.length;
 
-    // ------------------------------------------------------------------------
-    // FEASIBILITY CHECK
-    // ------------------------------------------------------------------------
-    // Before instantiating the solver, check if the problem is physically possible
+    /**
+    *  A "Big M" style penalty to help ensure the solver remains feasible.  If demand cannot be met, then the solver
+    *  will penalize these slack variables to signal infeasibility in results.  Due to memory constraints, this value
+    *  needs to adjust off maxCapacity to avoid excess computations, based to be higher than possible capacity (7-days).
+    */
+    const SLACK_PENALTY = 8 * maxCapacity;
 
-    let totalWeeklyHours = operationalTime.reduce((a, b) => a + b, 0);
-    let totalSetupHours = 0;
-    let totalCycleHours = 0;
-    let activeProducts = [];
-    let totalDemandTons = 0;
-    const safeCapacity = maxCapacity > 0 ? maxCapacity : 1; // Prevent Division by 0
-
-    for (let p of products) {
-        const totalDemand = (p.demand || []).reduce((a, b) => a + clean(b), 0);
-        if (totalDemand > 0) {
-            totalDemandTons += p.demand;
-            // Setup Time: Minutes -> Hours
-            const singleSetupHrs = clean(p.changeOverTime) / 60;
-            // Minimum setups based on weekly supply demand, by daily supply constraint
-            const minSetups = Math.ceil(totalDemand / safeCapacity);
-            // Total Minimum Setup Time is Minimum number of setups x setup time
-            totalSetupHours += (singleSetupHrs * minSetups);
-
-            // Cycle Time: Seconds -> Hours
-            const cycleHrs = (clean(p.cycleTime) / 3600) * totalDemand;
-            totalCycleHours += cycleHrs;
-
-            activeProducts.push({ name: p.name, requiredCycleHrs: cycleHrs });
-        }
-    }
-
-    // Check for required production hours to available production hours
-    let netAvailableHours = totalWeeklyHours - totalSetupHours;
-    if (totalCycleHours > (netAvailableHours + 0.01)) {
-        return {
-            status: 'Infeasible',
-            error: `Impossible: Total production needs ${totalCycleHours.toFixed(2)}h, but only ${netAvailableHours.toFixed(2)}h available (net).`
-        };
-    }
-
-    // Check for Material Capacity
-    if (totalDemandTons > (maxCapacity * 7)) {
-        return {
-            status: 'Infeasible',
-            error: 'Capacity Exceeded: Demand is ${totalDemandHours} tons, but max weekly capacity is ${totalWeeklyCapacity} tons.'
-        };
-    }
-
-    // ------------------------------------------------------------------------
-    // INITIALIZE SOLVER
-    // ------------------------------------------------------------------------
-    let solverInstance;
-    try {
-        solverInstance = await getSolverInstance();
-    } catch (error) {
-        return { status: 'Error', error: "Solver Load Failed: " + error.message };
-    }
-
-    // ------------------------------------------------------------------------
-    // BUILD LP STRING (CPLEX FORMAT)
-    // ------------------------------------------------------------------------
-    let lp = "Maximize\n obj: ";
+    // Initialize arrays for LP String components
+    let lpLines = ["Maximize"];
     let objTerms = [];
-    let binaryVars = [];
     let constraints = [];
+    let binaries = [];
 
-    // --- OBJECTIVE FUNCTION (Profitability) ---
+    // --- LP STRING GENERATION (CPLEX) ---
     for (let i = 0; i < productCount; i++) {
+        // For each product, parse the financial values of Sell Price, Mfg Cost, and Back Order Cost per ton
         const p = products[i];
-        const sellPrice = clean(p.sell);
-        const mfgCost = clean(p.cost);
-        const coCost = clean(p.changeOverCost);
-        const boCost = (backorderPenalty / 100) * sellPrice;
+        const sellPrice = parseFloat(p.sell) || 0;
+        const unitCost = (parseFloat(rawSteelCost) || 0) + (parseFloat(p.cost) || 0);
+        const boCost = (parseFloat(backorderPenalty) / 100) * sellPrice;
 
         for (let j = 0; j < daysCount; j++) {
-            // Revenue ( + )
-            if (sellPrice > 0) objTerms.push(`${fmt(sellPrice)} s_${i}_${j}`);
 
-            // Operational Costs ( - )
-            if (invCost > 0) objTerms.push(`-${fmt(invCost)} inv_${i}_${j}`);
-            if (boCost > 0) objTerms.push(`-${fmt(boCost)} bo_${i}_${j}`);
+            // For each day of the week, parse the anticipate Demand in tons
+            const dem = parseFloat(p.demand[j]) || 0;
 
-            // Manufacturing Costs ( - )
-            const totalMfgCost = rawSteelCost + mfgCost;
-            if (totalMfgCost > 0) objTerms.push(`-${fmt(totalMfgCost)} p_${i}_${j}`);
+            /**
+            * OBJECTIVE FUNCTION CONSTRUCTION
+            * Mathematical Construct: Z = Σ (Revenue) - Σ (Costs)
+            * i_{i}_{j} : Inventory of product i held at end of day j
+            * bo_{i}_{j} : Backorder (unmet demand) of product i on day j
+            * p_{i}_{j} : Production of Product i on day j
+            * b_{i}_{j} : Production Binary (1 if product i is produced on day j, else 0)
+            * s_{i}_{j} : Slack variable for demand satisfaction (Penalty variable)
+            */
+            if (invCost > 0) objTerms.push(`-${fmt(invCost)} i_${i}_${j}`); // Inventory Cost: Penalizes holding stock
+            if (boCost > 0) objTerms.push(`-${fmt(boCost)} bo_${i}_${j}`); // Backorder Cost: Penalizes late fulfillment
+            if (unitCost > 0) objTerms.push(`-${fmt(unitCost)} p_${i}_${j}`); // Production Cost: Cost per ton of steel + processing
+            if (p.changeOverCost > 0) objTerms.push(`-${fmt(p.changeOverCost)} b_${i}_${j}`); // Changeover Cost: Binary fixed cost
+            objTerms.push(`-${fmt(SLACK_PENALTY)} s_${i}_${j}`); // Slack Penalty: Penalty to mitigate mathematical infeasibility
 
-            // Change-over Cost ( - )
-            if (coCost > 0) objTerms.push(`-${fmt(coCost)} b_${i}_${j}`);
+            /**
+            * PRODUCTION BALANCE/FLOW CONSTRAINT
+            * Ensures that: Produced + Slack + (Prev Inv) + (Current Backorder) = (Current Demand) + (Current Inv) + (Prev Backorder)
+            * Which creates continuity between days, unifying daily constraints across the week.
+            * Formula: p + s - i + bo + i(prev) - bo(prev) = demand
+            */
+            let bal = `p_${i}_${j} + s_${i}_${j} - i_${i}_${j} + bo_${i}_${j}`;
+            if (j > 0) bal += ` + i_${i}_${j - 1} - bo_${i}_${j - 1}`;  // Handles First Day lack of priors
+            constraints.push(` c_bal_${i}_${j}: ${bal} = ${fmt(dem)}`);
 
-            binaryVars.push(`b_${i}_${j}`);
+            /**
+             * BINARY SETUP LINKING (Indicator Variable)
+             * Links production volume (p) to the binary changeover variable (b).
+             * p <= maxCapacity * b.  If b=0, production must be 0. If b=1, production is allowed up to max.
+             */
+            constraints.push(` c_link_${i}_${j}: p_${i}_${j} - ${fmt(maxCapacity)} b_${i}_${j} <= 0`);
+            binaries.push(`b_${i}_${j}`);
+
+            /**
+             * END-OF-WEEK BACKORDER CONSTRAINT
+             * Forces backorders to zero on the last day to ensure all demand
+             * is eventually satisfied by the end of the simulation.
+             */
+            if (j === daysCount - 1) constraints.push(` c_end_bo_${i}: bo_${i}_${j} = 0`);
         }
     }
-    if (objTerms.length === 0) objTerms.push("0");
-    lp += objTerms.join(" + ").replace(/\+ -/g, "- ") + "\n";
-    lp += "Subject To\n";
 
-    // --- CONSTRAINTS ---
+    /**
+     * OPERATIONAL AVAILABILITY
+     * Calculates the available production time based on Change-Over and Cycle Times for each Product and Day
+     */
     for (let j = 0; j < daysCount; j++) {
-        let dayCapTerms = [];
-        let dayTimeTerms = [];
-        const availTime = clean(operationalTime[j]);
-
+        // Total Physical Output Limit
+        let dayProd = [], dayTime = [];
+        const availSec = (parseFloat(operationalTime[j]) || 0) * 3600;
         for (let i = 0; i < productCount; i++) {
             const p = products[i];
-            const dem = clean(p.demand[j]);
-            const cycleSec = clean(p.cycleTime);
-            const coTimeMin = clean(p.changeOverTime);
-
-            // 1. Demand: Sold <= Demand (Cannot Exceed Demands)
-            constraints.push(`c_dem_${i}_${j}: s_${i}_${j} <= ${fmt(dem)}`);
-
-            // 2. Inventory Balance (Inventory Consistency between Days)
-            // Produced - Sold - Inventory + Backorder + PrevInv - PrevBackorder = 0
-            let balTerms = [`p_${i}_${j}`, `- s_${i}_${j}`, `- inv_${i}_${j}`, `bo_${i}_${j}`];
-            if (j > 0) {
-                balTerms.push(`inv_${i}_${j - 1}`);
-                balTerms.push(`- bo_${i}_${j - 1}`);
-            }
-            constraints.push(`c_bal_${i}_${j}: ${balTerms.join(" + ").replace(/\+ -/g, "- ")} = 0`);
-
-            // 3. Linking (Big M) Production <= Capacity * Binary
-            // If Capacity > 0, constrain Binary. If Capacity is 0, force P=0
-            if (maxCapacity > 0) {
-                constraints.push(`c_link_${i}_${j}: p_${i}_${j} - ${fmt(maxCapacity)} b_${i}_${j} <= 0`);
-            } else {
-                constraints.push(`c_link_${i}_${j}: p_${i}_${j} = 0`);
-            }
-
-            // Gather Terms for Daily Aggregates
-            dayCapTerms.push(`p_${i}_${j}`);
-
-            // Cycle (Sec -> Hrs)
-            if (cycleSec > 0) {
-                const coef = cycleSec / 3600;
-                if (coef > 0.000001) dayTimeTerms.push(`${fmt(coef)} p_${i}_${j}`);
-            }
-            // Setup (Min -> Hrs)
-            if (coTimeMin > 0) {
-                const coef = coTimeMin / 60;
-                if (coef > 0.000001) dayTimeTerms.push(`${fmt(coef)} b_${i}_${j}`);
-            }
+            dayProd.push(`p_${i}_${j}`);
+            if (p.cycleTime > 0) dayTime.push(`${fmt(p.cycleTime)} p_${i}_${j}`);
+            if (p.changeOverTime > 0) dayTime.push(`${fmt(p.changeOverTime * 60)} b_${i}_${j}`);
         }
 
-        // 4. Daily Capacity (Cannot exceed daily material supply/capacity)
-        if (dayCapTerms.length > 0) {
-            constraints.push(`c_cap_${j}: ${dayCapTerms.join(" + ")} <= ${fmt(maxCapacity)}`);
-        }
-
-        // 5. Operational Time (Cannot exceed available production time capacity)
-        if (dayTimeTerms.length > 0) {
-            constraints.push(`c_time_${j}: ${dayTimeTerms.join(" + ")} <= ${fmt(availTime)}`);
-        }
+        /**
+         * MATERIAL CAPACITY CONSTRAINT
+         * Total units of all products on day j cannot exceed maxCapacity.
+         */
+        if (dayProd.length > 0) constraints.push(` c_cap_${j}: ${dayProd.join(" + ")} <= ${fmt(maxCapacity)}`);
+        
+        /**
+         * OPERATIONAL TIME CONSTRAINT
+         * Sum of (Production Time + Changeover Time) <= available Operational Time (seconds).
+         */
+        if (dayTime.length > 0) constraints.push(` c_time_${j}: ${dayTime.join(" + ")} <= ${fmt(availSec)}`);
     }
 
-    // 6. End of Week Backorder (Must Fulfill all Orders by End of Week)
-    for (let i = 0; i < productCount; i++) {
-        constraints.push(`c_end_bo_${i}: bo_${i}_6 = 0`);
-    }
+    // LP String Construction for HiGHS Solver
+    const lpString = [
+        "Maximize",
+        " obj: " + objTerms.join(" ").replace(/ \+/g, " +").replace(/ -/g, " -"),
+        "Subject To",
+        ...constraints,
+        "Binaries",
+        " " + binaries.join("\n "),
+        "End"
+    ].join("\n");
 
-    lp += constraints.join("\n") + "\n";
-    if (binaryVars.length > 0) lp += "Binaries\n" + binaryVars.join("\n") + "\n";
-    lp += "End\n";
+    // Garbage Collection
+    objTerms = null; constraints = null; binaries = null;
 
-    // ------------------------------------------------------------------------
-    // PARSING SOLUTION RESULTS
-    // ------------------------------------------------------------------------
+    /**
+    * SOLVER EXECUTION & TWO-PHASE METHOD INTERPRETATION
+    * If the slack variable 's' is in the return, it indicates that (demand exceeds capacity).
+     */
     try {
-        // Executing Solver on LP String
-        const result = await solverInstance.solve(lp);
+        const result = highsModule.solve(lpString);
         const status = result?.Status || "Unknown";
+        const cols = result.Columns || {};
 
-        // Return Non-Optimal Schedule Error if Infeasible
-        if (status !== "Optimal") {
-            return { status: status, error: "Solver could not find an optimal schedule." };
+        // Check for Slack usage: If s > 0, the problem is physically infeasible.
+        let slackUsed = 0;
+        Object.keys(cols).forEach(k => { if (k.startsWith('s_')) slackUsed += cols[k].Primal; });
+
+        if (status !== "Optimal" || slackUsed > 0.01) {
+            return { status: 'Infeasible', error: "Demand exceeds capacity/time limits." };
         }
 
-        // Initialize Results Structure
-        const cols = result.Columns || {};
+        // --- PARSE RESULTS ---
         const parsedDetails = products.map((p, idx) => {
-            return {
-                product: p.name,
-                produced: [], sold: [], inventory: [], backorder: []
-            };
+            const d = { product: p.name, produced: [], sold: [], inventory: [], backorder: [] };
+            for (let j = 0; j < daysCount; j++) {
+                const getV = (k) => {
+                    const v = cols[k]?.Primal || 0;
+                    return Math.abs(v) < 1e-5 ? 0 : Math.round(v);
+                };
+                const boC = getV(`bo_${idx}_${j}`);
+                const boP = j > 0 ? getV(`bo_${idx}_${j - 1}`) : 0;
+                d.produced.push(getV(`p_${idx}_${j}`));
+                d.sold.push((parseFloat(p.demand[j]) || 0) - (boC - boP));
+                d.inventory.push(getV(`i_${idx}_${j}`));
+                d.backorder.push(boC);
+            }
+            return d;
         });
 
-        // Extract Time-Series Data
-        for (let j = 0; j < daysCount; j++) {
-            for (let i = 0; i < productCount; i++) {
-                const getVal = (key) => Math.round(cols[key]?.Primal || 0);
-                parsedDetails[i].produced.push(getVal(`p_${i}_${j}`));
-                parsedDetails[i].sold.push(getVal(`s_${i}_${j}`));
-                parsedDetails[i].inventory.push(getVal(`inv_${i}_${j}`));
-                parsedDetails[i].backorder.push(getVal(`bo_${i}_${j}`));
-            }
-        }
+        // Calculate Revenue (Demand * Price)
+        let rev = 0;
+        products.forEach(p => {
+            const sumDem = (p.demand || []).reduce((a, b) => a + (parseFloat(b) || 0), 0);
+            rev += sumDem * (parseFloat(p.sell) || 0);
+        });
 
-        // Return Optimal Solution Objective Value and Inventory Details
-        return {
-            status: 'Optimal',
-            result: {
-                objectiveValue: result.ObjectiveValue,
-                details: parsedDetails
-            }
-        };
+        return { status: 'Optimal', result: { objectiveValue: rev + result.ObjectiveValue, details: parsedDetails } };
 
     } catch (e) {
-        return { status: 'Error', error: e.message };
+        return { status: 'Error', error: "WASM Signature Error: Attempting auto-restart." };
     }
 }
 
-// --- WORKER MESSAGE HANDLER ---
+// ------------------------------------------------------------------------
+// MESSAGE HANDLER
+// ------------------------------------------------------------------------
 self.onmessage = async function (e) {
     const { type, data } = e.data;
     if (type === 'solve') {
-        try {
-            const output = await solveSteelProductionLP(data);
-            if (output.status === 'Optimal') {
-                self.postMessage({ type: 'result', status: 'Optimal', result: output.result });
-            } else {
-                self.postMessage({ type: 'error', error: output.error || output.status });
-            }
-        } catch (err) {
-            self.postMessage({ type: 'error', error: err.message });
-        }
+        const output = await solveSteelProductionLP(data);
+        self.postMessage({ type: 'result', ...output });
     }
 };
