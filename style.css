@@ -3,7 +3,8 @@
 :root {
     --primary: #2c3e50;
     --secondary: #34495e;
-    --accent: #3498db;
+    --accent: #3498db;;
+    --light-accent: #7bbdff;
     --accent-hover: #2980b9;
     --success: #27ae60;
     --warning: #f39c12;
@@ -41,6 +42,7 @@ body {
 
 .main-header {
     height: var(--header-height);
+    flex-direction: row;
     background-color: var(--primary);
     color: white;
     display: flex;
@@ -59,6 +61,7 @@ body {
     display: flex;
     flex: 1;
     overflow: hidden;
+    width: 100%;
 }
 
 .hidden-file-input {
@@ -69,18 +72,108 @@ body {
     flex: 1;
     display: flex;
     flex-direction: column;
+    overflow-y: auto;
+    min-width: 0;
     background-color: #f4f6f7;
-    position: relative;
+}
+
+/* --- Top Level Navigation --- */
+#topTabContent {
+    flex: 1;
+    display: flex;
     overflow: hidden;
+}
+
+.top-nav-bar {
+    display: flex;
+    gap: 1.1 rem;
+    height: 100%;
+    align-items: center;
+}
+
+.top-level-nav {
+    display: flex;
+    background-color: #1e1e1e;
+    padding: 0 20px;
+    border-bottom: 1px solid #333;
+    gap: 5px;
+}
+
+top-nav-bar {
+    display: flex;
+    height: 100%;
+    align-items: flex-end;
+}
+
+.top-tab-btn {
+    background: transparent;
+    border: none;
+    color: #888;
+    padding: 12px 20px;
+    height: 70%;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: all 0.2s ease;
+    border-bottom: 3px solid transparent;
+}
+
+.top-tab-btn:hover {
+    color: var(--light-accent);
+    background-color: var(--secondary);
+}
+
+.top-tab-btn.active {
+    color: var(--light-accent);
+    border-bottom-color: var(--accent);
+    background-color: var(--secondary);
+}
+
+.top-level-panel {
+    display: none;
+    width: 100%;
+    height: 100%;
+}
+
+.top-level-panel.active {
+    display: flex;
+    flex-direction: row;
+    flex: 1;
+}
+
+.top-level-panel .main-body {
+    height: 100%;
+    display: flex;
+}
+
+.placeholder-view {
+    padding: 40px;
+    text-align: center;
+    color: #666;
+}
+
+.placeholder-view h2 {
+    color: #eee;
+    margin-bottom: 10px;
+}
+
+.placeholder-content {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: #a0aec0
 }
 
 /* --- Sidebars --- */
 .sidebar {
     width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
     background-color: white;
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
     overflow-y: auto;
 }
 
@@ -103,6 +196,14 @@ body {
 
 .sidebar-content {
     padding: var(--spacing-md);
+}
+
+#stocks-panel .sidebar-header {
+    background-color: #f0fff4;
+}
+
+#stocks-panel .kpi-card {
+    background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
 }
 
 .input-group {

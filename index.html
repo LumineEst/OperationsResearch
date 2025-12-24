@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Production Schedule Optimizer</title>
+    <title>Operations Research Projects (Joel Wood)</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -13,100 +13,186 @@
 <body>
     <div class="app-container">
         <header class="main-header">
-            <h1>Production Schedule Optimizer</h1>
+            <h1>Enterprise Production Suite</h1>
+            <nav class="top-nav-bar" id="topNav">
+                <button class="top-tab-btn active" data-top-tab="inventory">Inventory Optimizer</button>
+                <button class="top-tab-btn" data-top-tab="stocks">Stock Trading Optimizer</button>
+                <button class="top-tab-btn" data-top-tab="scheduling">Scheduling Optimizer</button>
+            </nav>
         </header>
         <div class="main-body">
-            <aside class="sidebar left-sidebar" id="left-sidebar">
-                <div class="sidebar-header">
-                    <h2>Global Parameters</h2>
-                </div>
-                <div class="sidebar-content">
-                    <div class="input-group">
-                        <label><strong>Raw Steel Cost</strong> ($/ton)</label>
-                        <input type="number" id="rawSteelCost" value="2000" step="50">
-                    </div>
-                    <div class="input-group">
-                        <label><strong>Inventory Cost</strong> ($/ton/day)</label>
-                        <input type="number" id="invCost" value="20" step="1">
-                    </div>
-                    <div class="input-group">
-                        <label><strong>Max Capacity</strong> (tons/day)</label>
-                        <input type="number" id="maxCapacity" value="500" step="10">
-                    </div>
-                    <div class="input-group">
-                        <label><strong>Backorder Penalty</strong> (%)</label>
-                        <input type="number" id="backorderPenalty" value="2" step="0.1">
-                    </div>
-                </div>
-            </aside>
-            <main class="content-area">
-                <div class="tabs" id="tabs">
-                    <button class="tab-btn active" data-tab="charts">Production Schedule</button>
-                    <button class="tab-btn" data-tab="data">Product Demands</button>
-                </div>
-                <div id="charts-panel" class="vis-panel active">
-                    <div class="chart-wrapper">
-                        <h3>Daily Production Utilization</h3>
-                        <div id="productionChartContainer" class="d3-container"></div>
-                    </div>
-                    <div class="chart-wrapper">
-                        <h3>Inventory vs Backorders</h3>
-                        <div id="inventoryChartContainer" class="d3-container"></div>
-                    </div>
-                </div>
-                <div id="data-panel" class="vis-panel">
-                    <div class="panel-controls" style="margin-bottom: 10px; display: flex; gap: 10px;">
-                        <button class="btn btn-accent" id="addProductBtn" style="padding: 5px 15px;">+ Add Product</button>
-                    </div>
-                    <div class="table-container">
-                        <table id="inputTable">
-                            <thead>
-                                <tr>
-                                    <th>Product</th>
-                                    <th>Sell Price ($)</th>
-                                    <th>Mfg Cost ($)</th>
-                                    <th>Change Over Cost ($)</th>
-                                    <th>Change Over Time (min)</th>
-                                    <th>Cycle Time (sec)</th>
-                                    <th>Mon</th>
-                                    <th>Tue</th>
-                                    <th>Wed</th>
-                                    <th>Thu</th>
-                                    <th>Fri</th>
-                                    <th>Sat</th>
-                                    <th>Sun</th>
-                                </tr>
-                            </thead>
-                            <tbody id="tableBody">
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </main>
+            <div class="top-tab-content" id="topTabContent">
+                <section id="inventory-panel" class="top-level-panel active">
+                    <aside class="sidebar left-sidebar">
+                        <div class="sidebar-header">
+                            <h2>Inventory Params</h2>
+                        </div>
+                        <div class="sidebar-content">
+                            <div class="input-group">
+                                <label><strong>Raw Steel Cost</strong> ($/ton)</label>
+                                <input type="number" id="rawSteelCost" value="2000" step="50">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Inventory Cost</strong> ($/ton/day)</label>
+                                <input type="number" id="invCost" value="20" step="1">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Max Capacity</strong> (tons/day)</label>
+                                <input type="number" id="maxCapacity" value="500" step="10">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Backorder Penalty</strong> (%)</label>
+                                <input type="number" id="backorderPenalty" value="2" step="0.1">
+                            </div>
+                        </div>
+                    </aside>
+                    <main class="content-area">
+                        <div class="tabs" id="invTabs">
+                            <button class="tab-btn active" data-tab="charts">Production Schedule</button>
+                            <button class="tab-btn" data-tab="data">Product Demands</button>
+                        </div>
+                        <div id="charts-panel" class="vis-panel active">
+                            <div class="chart-wrapper">
+                                <h3>Daily Production Utilization</h3>
+                                <div id="productionChartContainer" class="d3-container"></div>
+                            </div>
+                            <div id="sharedLegend"></div>
+                            <div class="chart-wrapper">
+                                <h3>Inventory vs Backorders</h3>
+                                <div id="inventoryChartContainer" class="d3-container"></div>
+                            </div>
+                        </div>
+                        <div id="data-panel" class="vis-panel">
+                            <div class="panel-controls">
+                                <button class="btn btn-accent" id="addProductBtn">+ Add Product</button>
+                            </div>
+                            <div class="table-container">
+                                <table id="inputTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Product</th>
+                                            <th>Sell Price ($)</th>
+                                            <th>Mfg Cost ($)</th>
+                                            <th>CO Cost ($)</th>
+                                            <th>CO Time (m)</th>
+                                            <th>Cycle (s)</th>
+                                            <th>Mon</th>
+                                            <th>Tue</th>
+                                            <th>Wed</th>
+                                            <th>Thu</th>
+                                            <th>Fri</th>
+                                            <th>Sat</th>
+                                            <th>Sun</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="tableBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </main>
+                </section>
+                <section id="stocks-panel" class="top-level-panel">
+                    <aside class="sidebar left-sidebar">
+                        <div class="sidebar-header">
+                            <h2>Trading Params</h2>
+                        </div>
+                        <div class="sidebar-content">
+                            <div class="input-group">
+                                <label><strong>Initial Capital</strong> ($)</label>
+                                <input type="number" id="initialCash" value="10000000">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Buy Factor</strong></label>
+                                <input type="number" id="buyFactor" value="1.002" step="0.001">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Sell Factor</strong></label>
+                                <input type="number" id="sellFactor" value="0.998" step="0.001">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Daily Interest</strong> (%)</label>
+                                <input type="number" id="dailyInterest" value="0.008" step="0.001">
+                            </div>
+                            <div class="input-group">
+                                <label for="decayFactor">Alpha Decay (Market Ripple)</label>
+                                <div class="input-with-unit">
+                                    <input type="number" id="decayFactor" value="0" step="0.001" min="0" max="0.999">
+                                </div>
+                            </div>
+                        </div>
+                    </aside>
+                    <main class="content-area">
+                        <div class="tabs" id="stockTabs">
+                            <button class="tab-btn active" data-tab="stockCharts">Performance</button>
+                            <button class="tab-btn" data-tab="stockData">Price History</button>
+                        </div>
+                        <div id="stockCharts-panel" class="vis-panel active">
+                            <div class="chart-wrapper">
+                                <h3>Daily Trade Activity</h3>
+                                <div id="portfolioChartContainer" class="d3-container"></div>
+                            </div>
+                            <div id="sharedStockLegend"></div>
+                            <div class="chart-wrapper">
+                                <h3>Portfolio Asset Allocation</h3>
+                                <div id="allocationChartContainer" class="d3-container"></div>
+                            </div>
+                        </div>
+                        <div id="stockData-panel" class="vis-panel">
+                            <div class="table-container">
+                                <table id="stockPriceTable">
+                                    <thead id="stockTableHead"></thead>
+                                    <tbody id="stockTableBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </main>
+                </section>
+                <section id="scheduling-panel" class="top-level-panel">
+                    <aside class="sidebar left-sidebar">
+                        <div class="sidebar-header">
+                            <h2>Scheduling Params</h2>
+                        </div>
+                        <div class="sidebar-content">
+                            <div class="input-group">
+                                <label><strong>Shift Length</strong> (hours)</label>
+                                <input type="number" id="shiftLength" value="8">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Worker Count</strong></label>
+                                <input type="number" id="workerCount" value="10">
+                            </div>
+                        </div>
+                    </aside>
+                    <main class="content-area">
+                        <div class="placeholder-content">
+                            <h2>Scheduling Optimizer</h2>
+                            <p>Module configuration pending...</p>
+                        </div>
+                    </main>
+                </section>
+            </div>
             <aside class="sidebar right-sidebar" id="right-sidebar">
                 <div class="sidebar-header">
-                    <h2>Controls & Results</h2>
+                    <h2>Global Controls</h2>
                 </div>
                 <div class="sidebar-content">
-                    <div class="action-group"
-                        style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px;">
-                        <input type="file" id="excelInput" class="hidden-file-input" accept=".xlsx, .xls">
-                        <button class="btn btn-primary" onclick="document.getElementById('excelInput').click()">Import
-                            Excel</button>
+                    <div class="action-group" style="display:flex; flex-direction:column; gap:10px;">
+                        <input type="file" id="universalExcelInput" class="hidden-file-input" accept=".xlsx, .xls">
+                        <button class="btn btn-primary"
+                            onclick="document.getElementById('universalExcelInput').click()">Import Data</button>
                         <button class="btn btn-secondary" id="exportBtn">Export Results</button>
                     </div>
-                    <hr style="border: 0; border-top: 1px solid #444; margin: 20px 0;">
+                    <hr style="border:0; border-top:1px solid #444; margin:20px 0;">
                     <div class="kpi-card">
-                        <span class="kpi-label">Total Profit</span>
-                        <span class="kpi-value" id="objValueDisplay">$0.00</span>
+                        <span class="kpi-label" id="kpiLabel">Total Value</span>
+                        <span class="kpi-value" id="globalObjDisplay">$0.00</span>
                     </div>
                     <div class="kpi-group">
                         <h4>Status</h4>
                         <div id="statusIndicator" class="status-badge ready">Ready</div>
-                        <div style="margin-top: 8px; font-size: 0.75rem; color: #888; text-align: center; min-height: 1rem;"
-                            id="autoSaveStatus"></div>
-                    </div>
-                    <div class="kpi-group" id="detailedMetrics">
+                        <div id="autoSaveStatus"
+                            style="margin-top:8px; font-size:0.75rem; color:#888; text-align:center; min-height:1rem;">
+                        </div>
                     </div>
                 </div>
             </aside>

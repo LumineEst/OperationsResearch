@@ -19,10 +19,10 @@ let highsModule = null;
  *  512MB is allocated as a safe compatability buffer, and to avoid memory overflow.
  */
 try {
-    importScripts('libs/highs.js');
+    importScripts('../libs/highs.js');
     if (typeof Module === 'function') {
         highsModulePromise = Module({
-            locateFile: (file) => 'libs/' + file,
+            locateFile: (file) => '../libs/' + file,
             initialMemory: 512 * 1024 * 1024,
         }).then(instance => {
             highsModule = instance;
