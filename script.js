@@ -1211,23 +1211,31 @@ function drawPortfolioCompositionChart() {
 function showTopTooltip(d, prevD, event, tooltip, colorScale) {
     const dateStr = getFormattedDate(d.dayIdx);
     const growth = prevD ? ((d.totalValue - prevD.totalValue) / prevD.totalValue) * 100 : 0;
+    const priceRow = stockState.prices[d.dayIdx]; // Get current prices for this day
 
     let buyHtml = '', sellHtml = '';
     stockState.stocks.forEach(name => {
-        const bVal = d.buys[name] || 0;
-        const sVal = d.sells[name] || 0;
-        const c = colorScale(name); // Now guaranteed to work
+        const sharesBought = d.buys[name] || 0;
+        const sharesSold = d.sells[name] || 0;
+        const price = parseFloat(priceRow[name]) || 0;
+        const c = colorScale(name);
 
-        if (bVal > 0.1) buyHtml += `
-            <div class="tooltip-metric">
-                <span><i style="display:inline-block;width:8px;height:8px;background:${c};margin-right:5px;border-radius:1px;"></i>${name}:</span>
-                <span>${formatCurrency(bVal)}</span>
-            </div>`;
-        if (sVal > 0.1) sellHtml += `
-            <div class="tooltip-metric">
-                <span><i style="display:inline-block;width:8px;height:8px;background:${c};margin-right:5px;border-radius:1px;"></i>${name}:</span>
-                <span>${formatCurrency(sVal)}</span>
-            </div>`;
+        if (sharesBought > 0) {
+            const dollarAmount = sharesBought * price;
+            buyHtml += `
+                <div class="tooltip-metric">
+                    <span><i style="display:inline-block;width:8px;height:8px;background:${c};margin-right:5px;border-radius:1px;"></i>${name}:</span>
+                    <span>${formatCurrency(dollarAmount)} (${sharesBought.toFixed(1)} shares)</span>
+                </div>`;
+        }
+        if (sharesSold > 0) {
+            const dollarAmount = sharesSold * price;
+            sellHtml += `
+                <div class="tooltip-metric">
+                    <span><i style="display:inline-block;width:8px;height:8px;background:${c};margin-right:5px;border-radius:1px;"></i>${name}:</span>
+                    <span>${formatCurrency(dollarAmount)} (${sharesSold.toFixed(1)} shares)</span>
+                </div>`;
+        }
     });
 
     tooltip.style("opacity", 1)
@@ -1235,8 +1243,8 @@ function showTopTooltip(d, prevD, event, tooltip, colorScale) {
             <div style="font-weight:bold; border-bottom:1px solid #555; margin-bottom:5px;">${dateStr}</div>
             <div class="tooltip-row"><span>Cash Held:</span> <span>${formatCurrency(d.cashHeld)}</span></div>
             <div class="tooltip-row"><span>Daily Change:</span> <span style="color:${growth >= 0 ? '#2ecc71' : '#e74c3c'}">${growth.toFixed(2)}%</span></div>
-            ${buyHtml ? `<div class="tooltip-block buy-block"><strong>Bought</strong>${buyHtml}</div>` : ''}
-            ${sellHtml ? `<div class="tooltip-block sell-block"><strong>Sold</strong>${sellHtml}</div>` : ''}
+            ${buyHtml ? `<div class="tooltip-block buy-block"><strong>Total Bought</strong>${buyHtml}</div>` : ''}
+            ${sellHtml ? `<div class="tooltip-block sell-block"><strong>Total Sold</strong>${sellHtml}</div>` : ''}
         `)
         .style("left", (event.pageX + 15) + "px").style("top", (event.pageY - 28) + "px");
 }
