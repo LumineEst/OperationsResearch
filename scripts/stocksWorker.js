@@ -8,7 +8,7 @@
  * value based on deterministic (0.5% Confidence) projections.  However, these
  * projections fail to account for this model's own disruptions on stock values.
  * An Alpha Decay (Ripple) variable is used to simulate how dispersed or abrupt
- * purchases impact projections over time.   A Heuristic Validator is used after
+ * purchases impact projections over time.  A Heuristic Validator is used after
  * the LP simulation to remove small transactions and to finalize the solution.
  * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
  * @author Joel Wood
@@ -67,7 +67,7 @@ async function solvePortfolio(params) {
     // ============================================================================
 
     // λ : Marginal dollar impact per share (Arithmetic Step Coefficient)
-    const lambda = parseFloat(marginalChangeParam) || 0.0001;
+    const lambda = parseFloat(marginalChangeParam) || 0.0002;
     // φ : Exponential Moving Average (EMA) Alpha Decay coefficient
     const phi = parseFloat(decayFactor) || 0;
     // γ : Daily interest rate multiplier (Overnight Carry)
@@ -83,15 +83,15 @@ async function solvePortfolio(params) {
      * ============================================================================
      * Equation: Maximize Z = c_T + Σ (h_i,T * P_i,T * sellFactor)
      * Goal: Maximize the final "Settled Liquid Wealth" on the terminal day.
-     * The solver treats terminal holdings as cash minus the sellFactor friction. 
+     * The solver treats terminal holdings as cash minus the sellFactor friction.
      * This prevents holding "worthless" stock just to satisfy inventory constraints.
      */
     const lastDay = T - 1;
     let objTerms = [`c_${lastDay}`];
     stocks.forEach(stock => {
         const sKey = stock.replace(/\s+/g, '_');
-        const liqVal = (parseFloat(prices[lastDay][stock]) || 0) * sellFactor;
-        objTerms.push(`${fmt(liqVal)} h_${sKey}_${lastDay}`);
+        const price = parseFloat(prices[lastDay][stock]) || 0;
+        objTerms.push(`${fmt(price * sellFactor)} h_${sKey}_${lastDay}`);
     });
 
     lpLines.push(" obj: " + objTerms.join(" + "));
@@ -113,7 +113,7 @@ async function solvePortfolio(params) {
          * CASH BALANCE CONSTRAINT
          * ============================================================================
          * Equation: c_t - (c_t-1 * γ) + Σ(b_i,t * effBuy) - Σ(s_i,t * effSell) = 0
-         * where effBuy = (Price * buyFactor) + λ & effSell = (Price * sellFactor) - λ 
+         * where effBuy = (Price * buyFactor) + λ & effSell = (Price * sellFactor) - λ
          * PURPOSE: Adding a stepwise adjustment λ, linearizes marginal cost. The solver
          * sees a constant "Step" cost for every share. This creates a Liquidity limiter
          * that stops the solver from buying infinite shares when a signal is strong.
@@ -124,7 +124,7 @@ async function solvePortfolio(params) {
         stocks.forEach(stock => {
             const sKey = stock.replace(/\s+/g, '_');
             const pr = parseFloat(p[stock]) || 0;
-            const h0 = (t === 0 && initialHoldings) ? (parseFloat(initialHoldings[stock]) || 0) : 0;
+            const iH = (t === 0 && initialHoldings) ? (parseFloat(initialHoldings[stock]) || 0) : 0;
             const effBuy = (pr * buyFactor) + lambda;
             const effSell = (pr * sellFactor) - lambda;
 
@@ -135,12 +135,12 @@ async function solvePortfolio(params) {
              * ============================================================================
              * Equation: h_t - h_t-1 - b_t + s_t = 0
              * PURPOSE: Contiguous state of portfolio. Shares cannot be created or destroyed.
-             * Every share sold (s_t) must either have been bought today (b_t) 
+             * Every share sold (s_t) must either have been bought today (b_t)
              * or carried over from yesterday (h_t-1).
              */
             let invExpr = `h_${sKey}_${t} + s_${sKey}_${t} - b_${sKey}_${t}`;
             if (t > 0) invExpr += ` - h_${sKey}_${t - 1}`;
-            constraints.push(`inv_bal_${sKey}_${t}: ${invExpr} = ${fmt(h0)}`);
+            constraints.push(`inv_bal_${sKey}_${t}: ${invExpr} = ${fmt(iH)}`);
 
             /**============================================================================
              * ALPHA DECAY & CAPACITY (Ripple Constraint)
@@ -148,11 +148,11 @@ async function solvePortfolio(params) {
              * Equation: Σ (Volume_t-k * φ^k) <= ShareCap
              * PURPOSE: Simulates Market Impact over successive days on Trading.
              * The shareCap is calculated as (UnitProfit / λ). This is the exact equilibrium
-             * point where the marginal profit from one more share is zero because it is 
-             * cancelled out by the stepwise penalty.  This helps simulate how actions taken
-             * within a market do not exist in a vacuum, with an EMA impact over the period. 
+             * point where the marginal profit from one more share is zero because it is
+             * cancelled out by the stepwise penalty.  This helps simulate how actions taken
+             * within a market do not exist in a vacuum, with an EMA impact over the period.
              */
-            const DECAY_PERIOD = 7;
+            const DECAY_PERIOD = 5;
             let rippleExpr = `b_${sKey}_${t} + s_${sKey}_${t}`;
             if (phi > 0) {
                 for (let i = 1; i <= DECAY_PERIOD; i++) {
@@ -163,10 +163,9 @@ async function solvePortfolio(params) {
                 }
             }
 
-            let shareCap = 100000;
+            let shareCap = 1000000;
             if (t < T - 1) {
                 const pNext = parseFloat(prices[t + 1][stock]) || 0;
-                // Equilibrium Capacity Formula - Based on Signal Strength
                 const unitProfit = (pNext * sellFactor) - (pr * buyFactor * gamma) - omega;
                 shareCap = unitProfit > 0 ? (unitProfit / lambda) : 0;
             }
@@ -179,7 +178,7 @@ async function solvePortfolio(params) {
              * You cannot sell more than you held overnight.
              */
             if (t === 0) {
-                constraints.push(`seq_${sKey}_${t}: s_${sKey}_${t} <= ${fmt(h0 + 0.001)}`);
+                constraints.push(`seq_${sKey}_${t}: s_${sKey}_${t} <= ${fmt(iH + 0.001)}`);
             } else {
                 constraints.push(`seq_${sKey}_${t}: s_${sKey}_${t} - h_${sKey}_${t - 1} <= 0.001`);
             }
@@ -188,8 +187,13 @@ async function solvePortfolio(params) {
         constraints.push(`cash_bal_${t}: ${cashExpr} = ${(t === 0) ? fmt(initialCash) : 0}`);
     }
 
-    // --- LP FINALIZATION ---
-    const lpString = [...lpLines, ...constraints, "Bounds", "End"].join("\n");
+    // --- FINALIZING LP CPLEX STRING ---
+    const lpString = [
+        ...lpLines,
+        ...constraints,
+        "Bounds",
+        "End"
+    ].join("\n");
 
     try {
         if (!highsModule) await highsModulePromise;
@@ -205,52 +209,45 @@ async function solvePortfolio(params) {
          * ============================================================================
          * This takes solution values above a threshold and output an exact solution.
          * The LP model uses a linear step λ, which does not exactly reflect the discrete
-         * marginal penalty.   Additionally, adding firm limits on minimum transactions 
-         * would significantly increases computational complexity.  As such, parsing is
-         * best done after solving, where minor error is introduced in exchange for 
-         * computational feasibility.  This error is often less than that accrued from
+         * marginal penalty.  Additionally, adding firm limits on minimum transactions
+         * would significantly increases computational complexity.  As such, parsing is
+         * best done after solving, where minor error is introduced in exchange for
+         * computational feasibility.  This error is often less than that accrued from
          * linearization of the actual Arithmetic Progression Sum: Cost = λ * (V + 1) / 2
          */
         const runSimulation = (prune = false) => {
+            const CASH_THRESHOLD = 1000;
             let simCash = initialCash;
             let simHoldings = {};
-            let simLeaks = {};
-
             stocks.forEach(s => {
                 simHoldings[s] = parseFloat(initialHoldings ? initialHoldings[s] : 0) || 0;
-                simLeaks[s] = [0, 0, 0, 0, 0];
             });
 
             let logs = [];
-            const CASH_THRESHOLD = 500;
-
             for (let t = 0; t < T; t++) {
-                if (t > 0) simCash *= gamma; // Time Value of Money
-
-                let stockWealth = 0;
+                
+                // --- APPLY INTEREST ON STARTING CASH ---
+                if (t > 0) simCash *= gamma;
                 let log = { dayIdx: t, buys: {}, sells: {}, stockValues: {}, cashHeld: 0, totalValue: 0 };
-
-                // Identify and Filter out Trivial Trades
                 let dailyTrades = [];
+                
+                // --- REMOVE TRIVIAL TRADES ---
                 stocks.forEach(stock => {
                     const sKey = stock.replace(/\s+/g, '_');
                     const pr = parseFloat(prices[t][stock]) || 0;
                     let bS = cols[`b_${sKey}_${t}`]?.Primal || 0;
                     let sS = cols[`s_${sKey}_${t}`]?.Primal || 0;
 
-                    const dollarVolume = (bS + sS) * pr;
-                    if (prune && dollarVolume < CASH_THRESHOLD) {
-                        bS = 0; sS = 0;
-                    }
+                    if (prune && (bS + sS) * pr < CASH_THRESHOLD) { bS = 0; sS = 0; }
 
                     if (bS > 0.01 || sS > 0.01) {
-                        dailyTrades.push({ stock, sKey, bS, sS, pr });
+                        dailyTrades.push({ stock, bS, sS, pr });
                         if (bS > 0.01) log.buys[stock] = bS;
                         if (sS > 0.01) log.sells[stock] = sS;
                     }
                 });
 
-                // LIQUIDITY RECYCLING - Sells are processed before Buys.
+                // --- LIQUIDITY RECYCLING: SELLS FIRST ---
                 dailyTrades.forEach(tr => {
                     if (tr.sS > 0) {
                         const fee = (lambda * (tr.sS + 1)) / 2;
@@ -259,6 +256,7 @@ async function solvePortfolio(params) {
                     }
                 });
 
+                // --- LIQUIDITY RECYCLING: BUYS SECOND ---
                 dailyTrades.forEach(tr => {
                     if (tr.bS > 0) {
                         const fee = (lambda * (tr.bS + 1)) / 2;
@@ -267,13 +265,10 @@ async function solvePortfolio(params) {
                     }
                 });
 
-                // Update alpha decay and daily valuation
+                // --- FINAL EOD SETTLEMENT ---
+                let stockWealth = 0;
                 stocks.forEach(stock => {
                     const pr = parseFloat(prices[t][stock]) || 0;
-                    const tr = dailyTrades.find(d => d.stock === stock);
-                    simLeaks[stock].shift();
-                    simLeaks[stock].push(tr ? (tr.bS + tr.sS) : 0);
-
                     log.stockValues[stock] = simHoldings[stock] * pr;
                     stockWealth += log.stockValues[stock];
                 });
