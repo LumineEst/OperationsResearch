@@ -99,25 +99,23 @@
                         <div class="sidebar-content">
                             <div class="input-group">
                                 <label><strong>Initial Capital</strong> ($)</label>
-                                <input type="number" id="initialCash" value="10000000">
-                            </div>
-                            <div class="input-group">
-                                <label><strong>Buy Factor</strong></label>
-                                <input type="number" id="buyFactor" value="1.002" step="0.001">
-                            </div>
-                            <div class="input-group">
-                                <label><strong>Sell Factor</strong></label>
-                                <input type="number" id="sellFactor" value="0.998" step="0.001">
+                                <input type="number" id="initialCash" value="10000000" min="0">
                             </div>
                             <div class="input-group">
                                 <label><strong>Daily Interest</strong> (%)</label>
-                                <input type="number" id="dailyInterest" value="0.008" step="0.001">
+                                <input type="number" id="dailyInterest" value="0.008" step="0.001" min="0">
                             </div>
                             <div class="input-group">
-                                <label for="decayFactor">Alpha Decay (Market Ripple)</label>
-                                <div class="input-with-unit">
-                                    <input type="number" id="decayFactor" value="0" step="0.001" min="0" max="0.999">
-                                </div>
+                                <label><strong>Marginal Cost Slippage</strong> (%)</label>
+                                <input type="number" id="marginalSlippage" value="0.2" step="0.1" min="0">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Alpha Decay</strong> (Market Ripple)</label>
+                                <input type="number" id="decayFactor" value="0" step="0.01" min="0" max="0.999">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Minimum Trade Size</strong> ($)</label>
+                                <input type="number" id="minTrade" value="1000" step="100" min="0">
                             </div>
                         </div>
                     </aside>

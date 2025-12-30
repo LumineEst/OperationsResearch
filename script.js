@@ -34,7 +34,7 @@ let systemState = {
 };
 
 /**
- * Live operational Parameters bound to UI inputs to the DOM.
+ * Inventory Parameters bound to UI inputs to the DOM.
  */
 let liveState = {
     rawSteelCost: 2000,
@@ -51,6 +51,15 @@ let stockState = {
     stocks: [],
     results: null
 };
+
+/**
+ * Scheduling Parameters bound to UI Inputs to the DOM.
+ */
+let schedulingState = {
+    orders: [],
+    resources: [],
+    results: null
+}
 
 /**
  * Cached UI DOM elements
@@ -79,7 +88,9 @@ const els = {
     stockExcelInput: document.getElementById('stockExcelInput'),
     stockTableHead: document.getElementById('stockTableHead'),
     stockTableBody: document.getElementById('stockTableBody'),
-    stockTabs: document.getElementById('stockTabs')
+    stockTabs: document.getElementById('stockTabs'),
+    schedulingTableBody: document.getElementById('schedulingTableBody'),
+    schedulingStatus: document.getElementById('schedulingStatus')
 };
 
 // ============================================================================
@@ -125,12 +136,11 @@ async function loadModuleData(moduleType) {
 
     // Determine the correct default file
     if (moduleType === 'inventory') {
-        filePath = 'data/SampleData.xlsx';
+        filePath = 'data/Inventory.xlsx';
     } else if (moduleType === 'stocks') {
         filePath = 'data/Stocks.xlsx';
-    } else {
-        updateStatus("Module Pending", "ready");
-        return;
+    } else if (moduleType === 'scheduling') {
+        filePath = 'data/Scheduling.xlsx'
     }
 
     try {
@@ -146,6 +156,8 @@ async function loadModuleData(moduleType) {
                 processInventoryWorkbook(workbook);
             } else if (moduleType === 'stocks') {
                 processStockWorkbook(workbook);
+            } else if (moduleType === 'scheduling') {
+                processSchedulingWorkbook(workbook);
             }
         } else {
             console.warn(`Default file not found: ${filePath}`);
@@ -273,11 +285,10 @@ function requestStockSolve() {
     const params = {
         prices: stockState.prices, // Raw, undistorted historical prices
         initialCash: parseFloat(document.getElementById('initialCash').value) || 10000000,
-        buyFactor: parseFloat(document.getElementById('buyFactor').value) || 1.002,
-        sellFactor: parseFloat(document.getElementById('sellFactor').value) || 0.998,
         dailyInterest: parseFloat(document.getElementById('dailyInterest').value) || 0,
+        marginalChangeParam: parseFloat(document.getElementById('marginalSlippage').value) || 0.002,
         decayFactor: parseFloat(document.getElementById('decayFactor').value) || 0,
-        marginalChangeParam: 0.002 // λ (Lambda)
+        minTrade: parseFloat(document.getElementById('minTrade').value) || 1000
     };
 
     if (currentWorker) currentWorker.terminate();
@@ -465,10 +476,10 @@ async function handleUniversalUpload(event) {
             processInventoryWorkbook(workbook); // Inventory Tab
             break;
         case 'stocks':
-            processStockWorkbook(workbook); // Stock Tab
+            processStockWorkbook(workbook); // Stock Trading Tab
             break;
         case 'scheduling':
-            console.log("Scheduling parser not yet implemented.");
+            processSchedulingWorkbook(workbook); // Scheduling Tab
             break;
     }
     event.target.value = '';
@@ -1444,7 +1455,7 @@ function setupEventListeners() {
 
     // 6. STOCK PARAMETER LISTENERS
     // Automatically trigger stock solve when trading parameters change
-    ['initialCash', 'buyFactor', 'sellFactor', 'dailyInterest', 'decayFactor', 'simulationMode', 'forecastNoise'].forEach(id => {
+    ['initialCash', 'marginalSlippage', 'minTrade', 'dailyInterest', 'decayFactor', 'simulationMode', 'forecastNoise'].forEach(id => {
         const input = document.getElementById(id);
         if (input) {
             input.addEventListener('change', () => {

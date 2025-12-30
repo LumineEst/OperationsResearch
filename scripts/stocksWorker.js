@@ -55,8 +55,8 @@ function fmt(num) {
 // ============================================================================
 async function solvePortfolio(params) {
     const {
-        prices, initialCash, initialHoldings, buyFactor, sellFactor,
-        dailyInterest, marginalChangeParam, decayFactor
+        prices, initialCash, initialHoldings,
+        dailyInterest, marginalChangeParam, decayFactor, minTrade
     } = params;
 
     const T = prices.length;
@@ -67,16 +67,19 @@ async function solvePortfolio(params) {
     // ============================================================================
 
     // λ : Marginal dollar impact per share (Arithmetic Step Coefficient)
-    const lambda = parseFloat(marginalChangeParam) || 0.0002;
+    const lambda = parseFloat(marginalChangeParam / 100) || 0.0002;
     // φ : Exponential Moving Average (EMA) Alpha Decay coefficient
     const phi = parseFloat(decayFactor) || 0;
     // γ : Daily interest rate multiplier (Overnight Carry)
-    const gamma = 1 + (parseFloat(dailyInterest) / 100);
+    const gamma = 1 + (parseFloat(dailyInterest) / 100) || 1.00008;
     // Ω : Predictive Accuracy Metric (The Confidence Hurdle).
     const omega = 0.005;
+    // Approximation Resolution: Number of discrete tiers to linearize marginal cost.
+    const NUM_TIERS = 10;
 
     let lpLines = ["Maximize"];
     let constraints = [];
+    let bounds = [];
 
     /**============================================================================
      * OBJECTIVE FUNCTION (Z)
@@ -91,7 +94,8 @@ async function solvePortfolio(params) {
     stocks.forEach(stock => {
         const sKey = stock.replace(/\s+/g, '_');
         const price = parseFloat(prices[lastDay][stock]) || 0;
-        objTerms.push(`${fmt(price * sellFactor)} h_${sKey}_${lastDay}`);
+        // Objective accounts for terminal liquidity with no further slippage applied at Z.
+        objTerms.push(`${fmt(price)} h_${sKey}_${lastDay}`);
     });
 
     lpLines.push(" obj: " + objTerms.join(" + "));
@@ -101,8 +105,8 @@ async function solvePortfolio(params) {
      * DECISION VARIABLES (Per Period t)
      * ============================================================================
      * c_t: Cash balance at the end of day t (non-negative).
-     * b_i,t: Shares of stock i purchased on day t. (evening)
-     * s_i,t: Shares of stock i sold on day t. (morning)
+     * b_i,t_n: Shares of stock i purchased on day t in tier n.
+     * s_i,t_n: Shares of stock i sold on day t in tier n.
      * h_i,t: Inventory of shares of stock i held overnight from day t to t+1.
      */
 
@@ -112,11 +116,10 @@ async function solvePortfolio(params) {
         /**============================================================================
          * CASH BALANCE CONSTRAINT
          * ============================================================================
-         * Equation: c_t - (c_t-1 * γ) + Σ(b_i,t * effBuy) - Σ(s_i,t * effSell) = 0
-         * where effBuy = (Price * buyFactor) + λ & effSell = (Price * sellFactor) - λ
-         * PURPOSE: Adding a stepwise adjustment λ, linearizes marginal cost. The solver
-         * sees a constant "Step" cost for every share. This creates a Liquidity limiter
-         * that stops the solver from buying infinite shares when a signal is strong.
+         * Equation: c_t - (c_t-1 * γ) + Σ(Σ b_i,t,n * effBuy_n) - Σ(Σ s_i,t,n * effSell_n) = 0
+         * PURPOSE: Uses Piecewise Linearization to handle the arithmetic progression.
+         * Each tier has an increasing cost for buys and decreasing revenue for sells.
+         * This forces the solver to fill the lowest impact tiers first.
          */
         let cashExpr = `c_${t}`;
         if (t > 0) cashExpr += ` - ${fmt(gamma)} c_${t - 1}`;
@@ -125,20 +128,49 @@ async function solvePortfolio(params) {
             const sKey = stock.replace(/\s+/g, '_');
             const pr = parseFloat(p[stock]) || 0;
             const iH = (t === 0 && initialHoldings) ? (parseFloat(initialHoldings[stock]) || 0) : 0;
-            const effBuy = (pr * buyFactor) + lambda;
-            const effSell = (pr * sellFactor) - lambda;
 
-            cashExpr += ` + ${fmt(effBuy)} b_${sKey}_${t} - ${fmt(effSell)} s_${sKey}_${t}`;
+            // Dynamic capacity calculation to determine the width of approximation tiers.
+            let maxVol = 10000;
+            if (t < T - 1) {
+                const pNext = parseFloat(prices[t + 1][stock]) || 0;
+                // Price change must exceed overnight carry + confidence hurdle
+                const unitProfit = pNext - (pr * gamma) - omega;
+                maxVol = unitProfit > 0 ? (unitProfit / lambda) : 500;
+            }
+            const tierSize = Math.max(1, Math.ceil(maxVol / NUM_TIERS));
+
+            let buyTierSum = [];
+            let sellTierSum = [];
+            let buyVars = [];
+            let sellVars = [];
+
+            for (let n = 0; n < NUM_TIERS; n++) {
+                const bVar = `b_${sKey}_${t}_t${n}`;
+                const sVar = `s_${sKey}_${t}_t${n}`;
+
+                // Marginal cost at the midpoint of the tier approximates the integral of the cost.
+                const vMid = (n * tierSize) + (tierSize / 2);
+                const effBuy = pr + (lambda * vMid);
+                const effSell = pr - (lambda * vMid);
+
+                buyTierSum.push(`${fmt(effBuy)} ${bVar}`);
+                sellTierSum.push(`${fmt(effSell)} ${sVar}`);
+                buyVars.push(bVar);
+                sellVars.push(sVar);
+
+                bounds.push(`0 <= ${bVar} <= ${fmt(tierSize)}`);
+                bounds.push(`0 <= ${sVar} <= ${fmt(tierSize)}`);
+            }
+
+            cashExpr += ` + ${buyTierSum.join(" + ")} - ${sellTierSum.join(" - ")}`;
 
             /**============================================================================
              * INVENTORY BALANCE CONSTRAINT
              * ============================================================================
-             * Equation: h_t - h_t-1 - b_t + s_t = 0
+             * Equation: h_t - h_t-1 - Σ(b_t,n) + Σ(s_t,n) = 0
              * PURPOSE: Contiguous state of portfolio. Shares cannot be created or destroyed.
-             * Every share sold (s_t) must either have been bought today (b_t)
-             * or carried over from yesterday (h_t-1).
              */
-            let invExpr = `h_${sKey}_${t} + s_${sKey}_${t} - b_${sKey}_${t}`;
+            let invExpr = `h_${sKey}_${t} + ${sellVars.join(" + ")} - ${buyVars.join(" - ")}`;
             if (t > 0) invExpr += ` - h_${sKey}_${t - 1}`;
             constraints.push(`inv_bal_${sKey}_${t}: ${invExpr} = ${fmt(iH)}`);
 
@@ -146,41 +178,34 @@ async function solvePortfolio(params) {
              * ALPHA DECAY & CAPACITY (Ripple Constraint)
              * ============================================================================
              * Equation: Σ (Volume_t-k * φ^k) <= ShareCap
-             * PURPOSE: Simulates Market Impact over successive days on Trading.
-             * The shareCap is calculated as (UnitProfit / λ). This is the exact equilibrium
-             * point where the marginal profit from one more share is zero because it is
-             * cancelled out by the stepwise penalty.  This helps simulate how actions taken
-             * within a market do not exist in a vacuum, with an EMA impact over the period.
+             * PURPOSE: Simulates Market Impact over successive days on Trading, based on an EMA
+             * (Exponential Moving Average) in which weakening ripples move through successive days.
              */
-            const DECAY_PERIOD = 5;
-            let rippleExpr = `b_${sKey}_${t} + s_${sKey}_${t}`;
+            const DECAY_PERIOD = 21; // 3 weeks
+            let rippleExpr = `${buyVars.join(" + ")} + ${sellVars.join(" + ")}`;
             if (phi > 0) {
                 for (let i = 1; i <= DECAY_PERIOD; i++) {
                     if (t - i >= 0) {
                         const weight = Math.pow(phi, i);
-                        if (weight >= 0.001) rippleExpr += ` + ${fmt(weight)} b_${sKey}_${t - i} + ${fmt(weight)} s_${sKey}_${t - i}`;
+                        if (weight >= 0.001) {
+                            for (let n = 0; n < NUM_TIERS; n++) {
+                                rippleExpr += ` + ${fmt(weight)} b_${sKey}_${t - i}_t${n} + ${fmt(weight)} s_${sKey}_${t - i}_t${n}`;
+                            }
+                        }
                     }
                 }
             }
-
-            let shareCap = 1000000;
-            if (t < T - 1) {
-                const pNext = parseFloat(prices[t + 1][stock]) || 0;
-                const unitProfit = (pNext * sellFactor) - (pr * buyFactor * gamma) - omega;
-                shareCap = unitProfit > 0 ? (unitProfit / lambda) : 0;
-            }
-            constraints.push(`ripple_${sKey}_${t}: ${rippleExpr} <= ${fmt(shareCap + 0.5)}`);
+            constraints.push(`ripple_${sKey}_${t}: ${rippleExpr} <= ${fmt(maxVol + 0.5)}`);
 
             /**============================================================================
              * SEQUENCING CONSTRAINT (Swing Trading Rule)
              * ============================================================================
-             * PURPOSE: Prevents "Naked Shorting" and ensures same-day liquidity logic.
-             * You cannot sell more than you held overnight.
+             * PURPOSE: Prevents same-day trading of stocks and ensures same-day liquidity logic.
              */
             if (t === 0) {
-                constraints.push(`seq_${sKey}_${t}: s_${sKey}_${t} <= ${fmt(iH + 0.001)}`);
+                constraints.push(`seq_${sKey}_${t}: ${sellVars.join(" + ")} <= ${fmt(iH + 0.001)}`);
             } else {
-                constraints.push(`seq_${sKey}_${t}: s_${sKey}_${t} - h_${sKey}_${t - 1} <= 0.001`);
+                constraints.push(`seq_${sKey}_${t}: ${sellVars.join(" + ")} - h_${sKey}_${t - 1} <= 0.001`);
             }
         });
 
@@ -192,12 +217,13 @@ async function solvePortfolio(params) {
         ...lpLines,
         ...constraints,
         "Bounds",
+        ...bounds,
         "End"
     ].join("\n");
 
     try {
         if (!highsModule) await highsModulePromise;
-        // Transmit the CPLEX string to the WASM HiGHS engine.
+        // Pass the CPLEX String to the WASM HiGHs engine
         const result = highsModule.solve(lpString);
 
         // Check Dual Simplex Result Status
@@ -208,15 +234,16 @@ async function solvePortfolio(params) {
          * DISCRETE HEURISTIC PRUNING:
          * ============================================================================
          * This takes solution values above a threshold and output an exact solution.
-         * The LP model uses a linear step λ, which does not exactly reflect the discrete
-         * marginal penalty.  Additionally, adding firm limits on minimum transactions
-         * would significantly increases computational complexity.  As such, parsing is
+         * The LP model uses a piecewise approximation of the marginal slippage of costs
+         * to avoid a computationally intensive Quadratic model, this gives an approximation 
+         * with around 0.1% error.  Additionally, adding firm limits on minimum transactions
+         * would significantly increases computational complexity.  As such, parsing is
          * best done after solving, where minor error is introduced in exchange for
-         * computational feasibility.  This error is often less than that accrued from
+         * computational feasibility.  This error is often less than that accrued from
          * linearization of the actual Arithmetic Progression Sum: Cost = λ * (V + 1) / 2
          */
         const runSimulation = (prune = false) => {
-            const CASH_THRESHOLD = 1000;
+            const CASH_THRESHOLD = parseFloat(minTrade) || 1000;
             let simCash = initialCash;
             let simHoldings = {};
             stocks.forEach(s => {
@@ -225,19 +252,22 @@ async function solvePortfolio(params) {
 
             let logs = [];
             for (let t = 0; t < T; t++) {
-                
                 // --- APPLY INTEREST ON STARTING CASH ---
                 if (t > 0) simCash *= gamma;
                 let log = { dayIdx: t, buys: {}, sells: {}, stockValues: {}, cashHeld: 0, totalValue: 0 };
                 let dailyTrades = [];
-                
-                // --- REMOVE TRIVIAL TRADES ---
+
                 stocks.forEach(stock => {
                     const sKey = stock.replace(/\s+/g, '_');
                     const pr = parseFloat(prices[t][stock]) || 0;
-                    let bS = cols[`b_${sKey}_${t}`]?.Primal || 0;
-                    let sS = cols[`s_${sKey}_${t}`]?.Primal || 0;
 
+                    let bS = 0; let sS = 0;
+                    for (let n = 0; n < NUM_TIERS; n++) {
+                        bS += cols[`b_${sKey}_${t}_t${n}`]?.Primal || 0;
+                        sS += cols[`s_${sKey}_${t}_t${n}`]?.Primal || 0;
+                    }
+
+                    // --- REMOVE TRIVIAL TRADES ---
                     if (prune && (bS + sS) * pr < CASH_THRESHOLD) { bS = 0; sS = 0; }
 
                     if (bS > 0.01 || sS > 0.01) {
@@ -252,7 +282,7 @@ async function solvePortfolio(params) {
                     if (tr.sS > 0) {
                         const fee = (lambda * (tr.sS + 1)) / 2;
                         simHoldings[tr.stock] -= tr.sS;
-                        simCash += (tr.sS * (tr.pr * sellFactor - fee));
+                        simCash += (tr.sS * (tr.pr - fee));
                     }
                 });
 
@@ -261,7 +291,7 @@ async function solvePortfolio(params) {
                     if (tr.bS > 0) {
                         const fee = (lambda * (tr.bS + 1)) / 2;
                         simHoldings[tr.stock] += tr.bS;
-                        simCash -= (tr.bS * (tr.pr * buyFactor + fee));
+                        simCash -= (tr.bS * (tr.pr + fee));
                     }
                 });
 
@@ -282,11 +312,9 @@ async function solvePortfolio(params) {
 
         // LP Solver Output - Prone to Roundoff Error
         const rawLPValue = result.ObjectiveValue;
-
         // Heuristic No-Pruning (Baseline for error calculation)
         const baseline = runSimulation(false);
-
-        // Heuristic Pruned ($500 Floor Trade Value)
+        // Heuristic Pruned (Floor Trade Value)
         const pruned = runSimulation(true);
 
         /**============================================================================
@@ -303,13 +331,6 @@ async function solvePortfolio(params) {
             "[3] Actionable Plan (Pruned)": { Value: `$${pruned.nav.toLocaleString()}`, Error: `${pruneError.toFixed(5)}%` }
         });
 
-        if (pruneError < 0.5) {
-            console.log("%cSTATUS: Pruning acceptable (within 0.5% tolerance).", "color: #06add6ff;");
-        } else {
-            console.warn("STATUS: Pruning significantly impacts NAV. Strategy may be 'noise' dependent.", "color: #c70303ff;");
-        }
-
-        // Return pruned.logs to the UI so charts only reflect ACTIONABLE trades.
         return { status: 'Optimal', result: { finalPortfolioValue: pruned.nav, dailyLogs: pruned.logs } };
 
     } catch (e) {
