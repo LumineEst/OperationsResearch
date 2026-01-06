@@ -55,9 +55,10 @@ let stockState = {
 /**
  * Scheduling Parameters bound to UI Inputs to the DOM.
  */
-let schedulingState = {
-    orders: [],
-    resources: [],
+let schedState = {
+    employees: [], // { id, pay, minHrs, maxHrs, skills[], availability: {0: [], 1: []...}}
+    demands: [], // Hourly demands
+    selectedEmpId: null,
     results: null
 }
 
@@ -341,6 +342,78 @@ function updateStockResultsUI() {
     }
 }
 
+function requestSchedulingSolve() {
+    if (!schedState.employees || schedState.employees.length === 0) return;
+
+    updateStatus("Optimizing Roster...", "solving");
+
+    const params = {
+        employees: schedState.employees,
+        demands: schedState.demands,
+        shiftLength: parseInt(document.getElementById('shiftLength').value) || schedState.employees.length
+    };
+
+    if (currentWorker) currentWorker.terminate();
+    currentWorker = new Worker('scripts/scheduleWorker.js');
+
+    currentWorker.onmessage = (e) => {
+        if (e.data.type === 'result' && e.data.status === 'Optimal') {
+            schedState.results = e.data.result;
+            updateSchedulingResultsUI();
+            updateStatus("Optimal Roster Found", "optimal");
+        } else {
+            updateStatus("Infeasible Requirements", "error");
+        }
+    };
+
+    currentWorker.onerror = (err) => {
+        console.error("Scheduling Worker Error:", err);
+        updateStatus("Solver Error", "error");
+    };
+
+    currentWorker.postMessage({ type: 'solve', data: params });
+}
+
+/**
+ * Adds UI controls for filtering the roster
+ */
+function updateSchedulingResultsUI() {
+    if (!schedState.results) return;
+
+    // Update KPI (Labor Cost)
+    const display = document.getElementById('globalObjDisplay');
+    if (display) {
+        animateValue(display, schedState.results.objective, 400, (v) =>
+            Math.round(v).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+        );
+    }
+
+    const container = document.getElementById('scheduling-panel-sub');
+    container.innerHTML = `
+        <div class="roster-header" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:15px;">
+            <div style="display:flex; align-items:center; gap:15px;">
+                <h3>Optimal Roster</h3>
+                <select id="rosterDaySelect" class="input-group" style="padding:5px; border-radius:4px;">
+                    <option value="all">Full Week</option>
+                    <option value="0">Sunday</option><option value="1">Monday</option>
+                    <option value="2">Tuesday</option><option value="3">Wednesday</option>
+                    <option value="4">Thursday</option><option value="5">Friday</option>
+                    <option value="6">Saturday</option>
+                </select>
+            </div>
+            <div id="rosterLegend"></div>
+        </div>
+        <div id="rosterChartContainer" style="overflow-x:auto;"></div>
+    `;
+
+    const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
+    drawSchedulingLegend(document.getElementById('rosterLegend'), skillNames);
+
+    // Re-draw chart on select change
+    document.getElementById('rosterDaySelect').addEventListener('change', drawRosterChart);
+
+    drawRosterChart();
+}
 /**
  * Resets the global sidebar metrics to a neutral state.
  */
@@ -437,6 +510,34 @@ function getFormattedDate(dayIdx) {
     const row = stockState.prices[dayIdx];
     const month = monthNames[parseInt(row.Month)] || row.Month;
     return `${month} ${row.Day}`;
+}
+
+/**
+ * Converts array of hours [10, 11, 12, 14] into string "10-13, 14"
+ */
+function formatAvailability(hoursArray) {
+    if (!hoursArray || hoursArray.length === 0) return "Not Available";
+
+    // Force numeric sort to prevent ["10", "2", "20"] issues
+    const sorted = [...hoursArray].map(Number).sort((a, b) => a - b);
+
+    let blocks = [];
+    let start = sorted[0];
+    let prev = sorted[0];
+
+    for (let i = 1; i <= sorted.length; i++) {
+        if (i < sorted.length && sorted[i] === prev + 1) {
+            prev = sorted[i];
+        } else {
+            // Display as "10-14" (meaning 10, 11, 12, 13) or "10"
+            blocks.push(start === prev ? `${start}` : `${start}-${prev + 1}`);
+            if (i < sorted.length) {
+                start = sorted[i];
+                prev = sorted[i];
+            }
+        }
+    }
+    return blocks.join(", ");
 }
 
 // ============================================================================
@@ -648,11 +749,11 @@ function renderStockTable() {
     }
 
     // 2. Clear and Update Table Body
-    // We slice to the first 100 rows to maintain performance for large datasets
+    // We slice to the first 365 rows to maintain performance for large datasets
     if (els.stockTableBody) {
         els.stockTableBody.innerHTML = '';
 
-        const displayRows = stockState.prices.slice(0, 100);
+        const displayRows = stockState.prices.slice(0, 365);
 
         displayRows.forEach(row => {
             let rowHtml = `<tr>
@@ -670,14 +771,108 @@ function renderStockTable() {
         });
 
         // Add a message if data is truncated for view
-        if (stockState.prices.length > 100) {
+        if (stockState.prices.length > 365) {
             els.stockTableBody.innerHTML += `
                 <tr>
                     <td colspan="${stockState.stocks.length + 2}" style="text-align:center; color:#888; font-style:italic;">
-                        Showing first 100 entries. Entire dataset (${stockState.prices.length} days) used for optimization.
+                        Showing first year of entries. Entire dataset (${stockState.prices.length} days) used for optimization.
                     </td>
                 </tr>`;
         }
+    }
+}
+
+function processSchedulingWorkbook(workbook) {
+    try {
+        const empSheet = workbook.Sheets["Employees Requests"];
+        if (!empSheet) throw new Error("Sheet 'Employees Requests' not found");
+
+        const rows = XLSX.utils.sheet_to_json(empSheet, { header: 1 });
+
+        // 1. Standardized Skill Names (Matches Demands Sheet Headers)
+        const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
+
+        // 2. Lexicographical ID Sort
+        const empIds = rows[0].slice(1)
+            .filter(id => id !== undefined && id !== "")
+            .sort();
+
+        schedState.employees = empIds.map((id) => {
+            const col = rows[0].indexOf(id);
+            return {
+                id: id,
+                pay: rows[1][col],
+                minHrs: rows[2][col],
+                maxHrs: rows[3][col],
+                skills: [],
+                availability: { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] }
+            };
+        });
+
+        // 3. Parse Skills using mapped column indices
+        schedState.employees.forEach(emp => {
+            const col = rows[0].indexOf(emp.id);
+            for (let r = 4; r <= 8; r++) {
+                if (rows[r] && Number(rows[r][col]) === 1) {
+                    emp.skills.push(skillNames[r - 4]);
+                }
+            }
+        });
+
+        // 4. Parse Availability (Handling "Day,Hour" format)
+        for (let r = 10; r < rows.length; r++) {
+            const row = rows[r];
+            if (!row || !row[0]) continue;
+
+            const parts = String(row[0]).split(',');
+            if (parts.length < 2) continue;
+
+            const d = parseInt(parts[0]);
+            const h = parseInt(parts[1]);
+
+            schedState.employees.forEach(emp => {
+                const col = rows[0].indexOf(emp.id);
+                // Ensure we handle both string "1" and numeric 1
+                if (Number(row[col]) === 1) {
+                    if (emp.availability[d]) emp.availability[d].push(h);
+                }
+            });
+        }
+
+        // 5. Parse and Normalize Demands (Ensure exactly 168 slots)
+        const demandSheet = workbook.Sheets["Company Demands"] || workbook.Sheets["Demands"];
+        if (demandSheet) {
+            const raw = XLSX.utils.sheet_to_json(demandSheet);
+            const demandMap = {};
+
+            // Map raw data to a lookup table
+            raw.forEach(row => {
+                const key = row["Required Employees"]; // e.g., "0,10"
+                demandMap[key] = row;
+            });
+
+            // Create normalized 168-slot array
+            const normalizedDemands = [];
+            for (let d = 0; d < 7; d++) {
+                for (let h = 0; h < 24; h++) {
+                    const lookup = `${d},${h}`;
+                    const existing = demandMap[lookup] || {};
+                    const slot = { day: d, hour: h };
+                    skillNames.forEach(s => slot[s] = parseFloat(existing[s]) || 0);
+                    normalizedDemands.push(slot);
+                }
+            }
+            schedState.demands = normalizedDemands;
+        }
+
+        renderEmployeeList();
+        if (schedState.employees.length > 0) selectEmployee(schedState.employees[0].id);
+        requestSchedulingSolve();
+        updateStatus("Data Loaded = Starting Solver...", "solving");
+
+    } catch (err) {
+        console.error("Scheduling Import Error:", err);
+        updateStatus("Import Error", "error");
     }
 }
 
@@ -1326,16 +1521,442 @@ function drawStockCharts() {
     drawStockLegend();
 }
 
+/**
+ * Main Controller for Employee Details
+ * Populates Profile, Availability Table, and the Schedule Gantt
+ */
+function selectEmployee(id) {
+    console.log("Selecting Employee:", id); // Check console to see if this triggers
+    schedState.selectedEmpId = id;
+    const emp = schedState.employees.find(e => e.id === id);
+    if (!emp) return;
+
+    // 1. Update Sidebar Active State
+    document.querySelectorAll('.emp-item').forEach(el => {
+        el.classList.toggle('active', el.textContent === id);
+    });
+
+    // 2. Populate Profile Data
+    const profileEl = document.getElementById('employeeProfileContent');
+    if (profileEl) {
+        profileEl.innerHTML = `
+            <div class="profile-grid" style="color: #222;">
+                <p><strong>Pay:</strong> $${parseFloat(emp.pay).toFixed(2)}/hr</p>
+                <p><strong>Hours:</strong> ${emp.minHrs} - ${emp.maxHrs}</p>
+                <p style="grid-column: span 2;"><strong>Skills:</strong> ${emp.skills.join(', ') || 'None'}</p>
+            </div>
+        `;
+    }
+
+    // 3. Populate Availability Table (Dark Text)
+    const availEl = document.getElementById('employeeAvailabilityContent');
+    if (availEl) {
+        const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        let html = `<table class="availability-table" style="width:100%; color: #222;">`;
+        dayNames.forEach((name, idx) => {
+            const timeStr = formatAvailability(emp.availability[idx]);
+            html += `<tr><td style="font-weight:bold; width:35%;">${name}</td><td>${timeStr}</td></tr>`;
+        });
+        availEl.innerHTML = html + `</table>`;
+    }
+
+    // 4. Draw Gantt Chart with a "Ready" check
+    // We wait for the next animation frame to ensure the DOM has updated
+    requestAnimationFrame(() => {
+        renderIndividualGantt(emp);
+    });
+}
+
+/**
+ * Populates the scrollable list of Employee IDs
+ */
+function renderEmployeeList() {
+    const list = document.getElementById('employeeList');
+    if (!list) return;
+
+    list.innerHTML = '';
+    schedState.employees.forEach(emp => {
+        const item = document.createElement('div');
+        item.className = 'emp-item';
+        // Add active class if this is the selected employee
+        if (schedState.selectedEmpId === emp.id) item.classList.add('active');
+
+        item.textContent = emp.id;
+        item.onclick = () => selectEmployee(emp.id);
+        list.appendChild(item);
+    });
+}
+
+function renderIndividualGantt(emp) {
+    const container = document.getElementById('individualGantt');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const margin = { top: 20, right: 30, bottom: 30, left: 60 };
+    const width = (container.clientWidth || 800) - margin.left - margin.right;
+    const rowHeight = 40;
+    const height = 7 * rowHeight;
+
+    const svg = d3.select(container).append("svg")
+        .attr("width", width + margin.left + margin.right)
+        .attr("height", height + margin.top + margin.bottom)
+        .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const x = d3.scaleLinear().domain([0, 24]).range([0, width]);
+    const dayAbbr = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
+    const colorScale = d3.scaleOrdinal().domain(skillNames).range(d3.schemeCategory10);
+
+    dayAbbr.forEach((day, dIdx) => {
+        const y = dIdx * rowHeight;
+
+        // Y-Axis Labels
+        svg.append("text").attr("x", -10).attr("y", y + 20)
+            .attr("text-anchor", "end").style("font-size", "12px").attr("fill", "#333").text(day);
+
+        // Track Background
+        svg.append("rect").attr("x", 0).attr("y", y).attr("width", width).attr("height", 30)
+            .attr("fill", "#f8f9fa").attr("stroke", "#eee").attr("rx", 4);
+
+        // 1. Availability (Green)
+        if (emp.availability[dIdx]) {
+            emp.availability[dIdx].forEach(h => {
+                svg.append("rect").attr("x", x(h)).attr("y", y).attr("width", x(1) - x(0))
+                    .attr("height", 30).attr("fill", "#c3e6cb").attr("opacity", 0.7);
+            });
+        }
+
+        // 2. Scheduled Assignments (Tasks)
+        if (schedState.results && schedState.results.roster) {
+            const rosterEntry = schedState.results.roster.find(r => r.id === emp.id);
+            if (rosterEntry) {
+                for (let h = 0; h < 24; h++) {
+                    const role = rosterEntry.schedule[dIdx * 24 + h];
+                    if (role) {
+                        svg.append("rect")
+                            .attr("x", x(h)).attr("y", y + 4)
+                            .attr("width", x(1) - x(0) - 1).attr("height", 22)
+                            .attr("fill", colorScale(role))
+                            .attr("rx", 2)
+                            .append("title").text(role);
+                    }
+                }
+            }
+        }
+    });
+
+    svg.append("g").attr("transform", `translate(0,${height})`)
+        .call(d3.axisBottom(x).ticks(12).tickFormat(d => d + ":00"));
+}
+
+/**
+ * Updates the right-hand panel with specific Employee Details
+ */
+function selectEmployee(id) {
+    schedState.selectedEmpId = id;
+    const emp = schedState.employees.find(e => e.id === id);
+    if (!emp) return;
+
+    // Highlight in list
+    document.querySelectorAll('.emp-item').forEach(el => {
+        el.classList.toggle('active', el.textContent === id);
+    });
+
+    // Render Profile
+    document.getElementById('employeeProfileContent').innerHTML = `
+        <div class="profile-grid">
+            <div class="profile-stat"><strong>Hourly Pay:</strong> $${parseFloat(emp.pay).toFixed(2)}</div>
+            <div class="profile-stat"><strong>Min Hours:</strong> ${emp.minHrs}</div>
+            <div class="profile-stat"><strong>Skills:</strong> ${emp.skills.join(', ') || 'None'}</div>
+            <div class="profile-stat"><strong>Max Hours:</strong> ${emp.maxHrs}</div>
+        </div>
+    `;
+
+    // Render Weekly Availability
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    let availHtml = `<table class="availability-table" style="width:100%">`;
+    dayNames.forEach((name, idx) => {
+        const timeString = formatAvailability(emp.availability[idx]);
+        availHtml += `
+            <tr>
+                <td style="width:30%; font-weight:bold; color: #666;">${name}</td>
+                <td style="color:${timeString === 'Not Available' ? '#222' : '#666'}">${timeString}</td>
+            </tr>`;
+    });
+    availHtml += `</table>`;
+    document.getElementById('employeeAvailabilityContent').innerHTML = availHtml;
+}
+
+function drawSchedulingCharts() {
+    if (!schedState.employees.length || !schedState.demands.length) return;
+
+    const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
+
+    // Aggregating Supply Data (Labor Availability)
+    const supplyData = [];
+    for (let d = 0; d < 7; d++) {
+        for (let h = 0; h < 24; h++) {
+            const slot = { day: d, hour: h, totalUnique: 0 };
+            const uniqueEmps = new Set();
+            skillNames.forEach(skill => slot[skill] = 0);
+
+            schedState.employees.forEach(emp => {
+                if (emp.availability[d].includes(h)) {
+                    uniqueEmps.add(emp.id);
+                    emp.skills.forEach(s => {
+                        if (skillNames.includes(s)) slot[s]++;
+                    });
+                }
+            });
+            slot.totalUnique = uniqueEmps.size;
+            supplyData.push(slot);
+        }
+    }
+
+    // Ensure Legend Container exists between the two charts
+    let legendContainer = document.getElementById('sharedSchedulingLegend');
+    if (!legendContainer) {
+        legendContainer = document.createElement('div');
+        legendContainer.id = 'sharedSchedulingLegend';
+        const supplyWrapper = document.getElementById('supplyChartContainer').parentElement;
+        supplyWrapper.parentNode.insertBefore(legendContainer, supplyWrapper);
+    }
+    drawSchedulingLegend(legendContainer, skillNames);
+
+    // Render the charts
+    renderStackedChart("#demandChartContainer", schedState.demands, skillNames, "Demand");
+    renderStackedChart("#supplyChartContainer", supplyData, skillNames, "Supply");
+}
+
+function drawSchedulingLegend(container, keys) {
+    container.innerHTML = '';
+    Object.assign(container.style, {
+        display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '1.2rem', padding: '10px'
+    });
+
+    const color = d3.scaleOrdinal().domain(keys).range(d3.schemeCategory10);
+
+    keys.forEach(key => {
+        const item = document.createElement('div');
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+
+        const box = document.createElement('div');
+        Object.assign(box.style, {
+            width: '12px', height: '12px', backgroundColor: color(key), marginRight: '6px', borderRadius: '2px'
+        });
+
+        const text = document.createElement('span');
+        text.textContent = key;
+        text.style.fontSize = '0.85rem';
+        text.style.color = '#333';
+
+        item.appendChild(box);
+        item.appendChild(text);
+        container.appendChild(item);
+    });
+}
+
+/**
+ * Stacked Bar Chart Renderer
+ */
+function renderStackedChart(containerId, data, keys, type) {
+    const container = d3.select(containerId);
+    container.selectAll("*").remove();
+
+    const rect = container.node().getBoundingClientRect();
+    const margin = { top: 10, right: 30, bottom: 40, left: 50 };
+    const width = rect.width - margin.left - margin.right;
+    const height = rect.height - margin.top - margin.bottom;
+
+    const svg = container.append("svg")
+        .attr("width", rect.width)
+        .attr("height", rect.height)
+        .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const color = d3.scaleOrdinal().domain(keys).range(d3.schemeCategory10);
+    const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    // 1. Calculate Variable Widths
+    // Weight = 1.0 if any category > 0, else 0.5
+    const weights = data.map(d => {
+        const total = keys.reduce((sum, k) => sum + (d[k] || 0), 0);
+        return total > 0 ? 1.0 : 0.3;
+    });
+    const totalWeight = d3.sum(weights);
+
+    // Helper to get X position and Width for index i
+    const getX = (index) => (d3.sum(weights.slice(0, index)) / totalWeight) * width;
+    const getBarWidth = (index) => (weights[index] / totalWeight) * width;
+
+    // 2. Y Scale
+    const yMax = d3.max(data, d => keys.reduce((sum, k) => sum + (d[k] || 0), 0));
+    const y = d3.scaleLinear().domain([0, Math.max(yMax, 1) * 1.1]).range([height, 0]);
+
+    // 3. Axes
+    // Draw Day labels at the start of each 24h block
+    const xAxis = svg.append("g").attr("transform", `translate(0,${height})`);
+    dayNames.forEach((day, i) => {
+        const xPos = getX(i * 24);
+        xAxis.append("text")
+            .attr("x", xPos + 5)
+            .attr("y", 20)
+            .attr("fill", "#666")
+            .style("font-size", "12px")
+            .text(day);
+
+        xAxis.append("line")
+            .attr("x1", xPos).attr("x2", xPos)
+            .attr("y1", 0).attr("y2", 5)
+            .attr("stroke", "#ccc");
+    });
+
+    svg.append("g").call(d3.axisLeft(y).ticks(5));
+
+    // 4. Bars
+    const stackedData = d3.stack().keys(keys)(data);
+
+    const layers = svg.selectAll(".layer")
+        .data(stackedData)
+        .enter().append("g")
+        .attr("fill", d => color(d.key));
+
+    layers.selectAll("rect")
+        .data(d => d)
+        .enter().append("rect")
+        .attr("x", (d, i) => getX(i))
+        .attr("y", d => y(d[1]))
+        .attr("height", d => y(d[0]) - y(d[1]))
+        .attr("width", (d, i) => getBarWidth(i) - 0.5);
+
+    // 5. Tooltip Overlay (Transparent rects for per-hour hover)
+    const tooltip = d3.select("#d3-tooltip");
+
+    svg.selectAll(".tooltip-overlay")
+        .data(data)
+        .enter().append("rect")
+        .attr("class", "tooltip-overlay")
+        .attr("x", (d, i) => getX(i))
+        .attr("y", 0)
+        .attr("width", (d, i) => getBarWidth(i))
+        .attr("height", height)
+        .attr("fill", "transparent")
+        .on("mouseover", function (event, d) {
+            const isClosed = keys.reduce((sum, k) => sum + (d[k] || 0), 0) === 0;
+            const totalDisplay = (type === "Supply") ? d.totalUnique : keys.reduce((sum, k) => sum + (d[k] || 0), 0);
+
+            let html = `
+                <div style="font-weight:bold; border-bottom:1px solid #444; margin-bottom:5px;">
+                    ${dayNames[d.day]} - Hour ${d.hour}:00
+                </div>`;
+            if (isClosed) {
+                html += `<div style="color:#e74c3c; font-weight:bold; text-align:center;">CLOSED</div>`;
+            } else {
+                keys.forEach(k => {
+                    const val = d[k] || 0;
+                    if (val > 0) {
+                        html += `
+                        <div style="display:flex; justify-content:space-between; gap:20px; font-size:0.85rem;">
+                            <span><i style="display:inline-block; width:8px; height:8px; background:${color(k)}; margin-right:5px; border-radius:1px;"></i>${k}:</span>
+                            <span style="font-weight:bold;">${val}</span>
+                        </div>`;
+                    }
+                });
+                html += `
+                <div style="margin-top:5px; padding-top:5px; border-top:1px solid #444; display:flex; justify-content:space-between; font-weight:bold;">
+                    <span>Total Employees:</span>
+                    <span>${totalDisplay}</span>
+                </div>`;
+            }
+
+            tooltip.style("opacity", 1).html(html);
+        })
+        .on("mousemove", (event) => {
+            tooltip.style("left", (event.pageX + 15) + "px")
+                .style("top", (event.pageY - 28) + "px");
+        })
+        .on("mouseout", () => tooltip.style("opacity", 0));
+}
+
+/**
+ * Filtered Roster Chart logic
+ */
+function drawRosterChart() {
+    const container = document.getElementById('rosterChartContainer');
+    if (!container || !schedState.results) return;
+    container.innerHTML = '';
+
+    const selectedDay = document.getElementById('rosterDaySelect').value;
+    const fullData = schedState.results.roster;
+
+    // FILTER: Only show employees working on the selected day
+    let filteredData = fullData;
+    if (selectedDay !== "all") {
+        const dayIdx = parseInt(selectedDay);
+        filteredData = fullData.filter(emp => {
+            const daySlice = emp.schedule.slice(dayIdx * 24, (dayIdx + 1) * 24);
+            return daySlice.some(role => role !== null);
+        });
+    }
+
+    const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
+    const color = d3.scaleOrdinal().domain(skillNames).range(d3.schemeCategory10);
+    const dayAbbr = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    const cellWidth = 15;
+    const cellHeight = 22;
+    const hoursToShow = selectedDay === "all" ? 168 : 24;
+    const width = (hoursToShow * cellWidth);
+    const height = (filteredData.length * cellHeight);
+
+    const svg = d3.select(container).append("svg")
+        .attr("width", width + 100).attr("height", height + 50)
+        .append("g").attr("transform", "translate(80,30)");
+
+    // Render logic (Adjusted for Filtered View)
+    filteredData.forEach((emp, eIdx) => {
+        const y = eIdx * cellHeight;
+
+        svg.append("text").attr("x", -10).attr("y", y + 15)
+            .attr("text-anchor", "end").style("font-size", "11px").text(emp.id);
+
+        const startIdx = selectedDay === "all" ? 0 : parseInt(selectedDay) * 24;
+        for (let t = 0; t < hoursToShow; t++) {
+            const role = emp.schedule[startIdx + t];
+            if (role) {
+                svg.append("rect")
+                    .attr("x", t * cellWidth).attr("y", y + 2)
+                    .attr("width", cellWidth - 1).attr("height", cellHeight - 4)
+                    .attr("fill", color(role)).attr("rx", 2);
+            }
+        }
+    });
+
+    // Time Labels
+    for (let t = 0; t < hoursToShow; t += (selectedDay === "all" ? 24 : 4)) {
+        const label = selectedDay === "all" ? dayAbbr[t / 24] : `${t}:00`;
+        svg.append("text").attr("x", t * cellWidth).attr("y", -10)
+            .style("font-size", "10px").attr("fill", "#888").text(label);
+
+        svg.append("line").attr("x1", t * cellWidth).attr("x2", t * cellWidth)
+            .attr("y1", -5).attr("y2", height).attr("stroke", "#eee");
+    }
+}
+
 // ============================================================================
 // UI HELPER FUNCTIONS
 // ============================================================================
 
 /**
  * Attaches Event Listeners to UI elements (Tabs and Buttons)
+ * Manages module switching, sub-tab navigation, and parameter changes.
  */
 function setupEventListeners() {
     // 1. TOP-LEVEL NAVIGATION (Module Switching)
-    topNav = document.getElementById('topNav');
+    // Manages switching between Inventory, Stocks, and Scheduling
+    const topNav = document.getElementById('topNav');
     if (topNav) {
         topNav.addEventListener('click', (e) => {
             const btn = e.target.closest('.top-tab-btn');
@@ -1354,42 +1975,20 @@ function setupEventListeners() {
             const targetPanel = document.getElementById(module + '-panel');
             if (targetPanel) targetPanel.classList.add('active');
 
+            // Update Global UI Context (KPI Label)
+            const kpiLabel = document.getElementById('kpiLabel');
+            if (kpiLabel) {
+                if (module === 'inventory') kpiLabel.textContent = "Total Profit";
+                else if (module === 'stocks') kpiLabel.textContent = "Final Portfolio Value";
+                else if (module === 'scheduling') kpiLabel.textContent = "Efficiency Score";
+            }
+
             // Trigger Automatic Load and Solve
             loadModuleData(module);
         });
     }
 
-    // 2. TOP-LEVEL NAVIGATION (Module Switching)
-    // Manages switching between Inventory, Stocks, and Scheduling
-    topNav = document.getElementById('topNav');
-    if (topNav) {
-        topNav.addEventListener('click', (e) => {
-            const btn = e.target.closest('.top-tab-btn');
-            if (!btn) return;
-
-            // Toggle top buttons
-            document.querySelectorAll('.top-tab-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-
-            // Toggle top panels
-            document.querySelectorAll('.top-level-panel').forEach(p => p.classList.remove('active'));
-            const targetPanel = document.getElementById(btn.dataset.topTab + '-panel');
-
-            if (targetPanel) {
-                targetPanel.classList.add('active');
-
-                // Redraw visuals for the newly visible module if results exist
-                const module = btn.dataset.topTab;
-                if (module === 'inventory' && systemState.results) {
-                    updateResultsUI(); // Redraws Inventory Charts
-                } else if (module === 'stocks' && stockState.results) {
-                    updateStockResultsUI(); // Redraws Stock Charts
-                }
-            }
-        });
-    }
-
-    // 3. INVENTORY SUB-TAB NAVIGATION
+    // 2. INVENTORY SUB-TAB NAVIGATION
     // Manages switching between "Production Schedule" and "Product Demands"
     const invTabs = document.getElementById('invTabs');
     if (invTabs) {
@@ -1397,11 +1996,9 @@ function setupEventListeners() {
             const btn = e.target.closest('.tab-btn');
             if (!btn) return;
 
-            // Only remove 'active' from buttons inside the Inventory module
             invTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
 
-            // Only remove 'active' from panels inside the Inventory module
             const invContainer = document.getElementById('inventory-panel');
             invContainer.querySelectorAll('.vis-panel').forEach(p => p.classList.remove('active'));
 
@@ -1409,7 +2006,6 @@ function setupEventListeners() {
             const targetPanel = document.getElementById(targetId);
             if (targetPanel) {
                 targetPanel.classList.add('active');
-                // If user clicks the chart tab, force D3 to re-calculate dimensions
                 if (btn.dataset.tab === 'charts' && systemState.results) {
                     drawCharts();
                 }
@@ -1417,7 +2013,7 @@ function setupEventListeners() {
         });
     }
 
-    // 4. STOCK SUB-TAB NAVIGATION
+    // 3. STOCK SUB-TAB NAVIGATION
     // Manages switching between "Performance" and "Price History"
     const stockTabs = document.getElementById('stockTabs');
     if (stockTabs) {
@@ -1442,8 +2038,54 @@ function setupEventListeners() {
         });
     }
 
+    // 4. SCHEDULING SUB-TAB NAVIGATION
+    // Manages switching between Scheduling, Employees, and Demands
+    const schedTabs = document.getElementById('schedTabs');
+    if (schedTabs) {
+        schedTabs.addEventListener('click', (e) => {
+            const btn = e.target.closest('.tab-btn');
+            if (!btn) return;
+
+            schedTabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const schedContainer = document.getElementById('scheduling-panel');
+            schedContainer.querySelectorAll('.vis-panel').forEach(p => p.classList.remove('active'));
+
+            // The 'scheduling' tab uses a specific sub-panel ID to avoid conflict with the main panel
+            const targetId = btn.dataset.tab === 'scheduling' ? 'scheduling-panel-sub' : btn.dataset.tab + '-panel';
+            const targetPanel = document.getElementById(targetId);
+
+            // Handle Sidebar Visibility for Employee List
+            const empListContainer = document.getElementById('employee-list-container');
+            if (empListContainer) {
+                empListContainer.style.display = (btn.dataset.tab === 'employees') ? 'block' : 'none';
+            }
+
+            if (targetPanel) {
+                targetPanel.classList.add('active');
+                // Redraw charts if Demands tab is selected
+                if (btn.dataset.tab === 'demands') {
+                    drawSchedulingCharts();
+                }
+            }
+
+            if (btn.dataset.tab === 'scheduling' && schedState.results) {
+                drawRosterChart();
+            }
+
+            if (btn.dataset.tab === 'employees' && schedState.selectedEmpId) {
+                const emp = schedState.employees.find(e => e.id === schedState.selectedEmpId);
+                if (emp) setTimeout(() => renderIndividualGantt(emp, 50));
+            }
+
+            if (btn.dataset.tab === 'demands' && schedState.results) {
+                drawSchedulingCharts();
+            }
+        });
+    }
+
     // 5. INVENTORY PARAMETER LISTENERS
-    // Automatically trigger solve when global parameters change
     ['rawSteelCost', 'invCost', 'maxCapacity', 'backorderPenalty'].forEach(id => {
         const input = document.getElementById(id);
         if (input) {
@@ -1454,8 +2096,7 @@ function setupEventListeners() {
     });
 
     // 6. STOCK PARAMETER LISTENERS
-    // Automatically trigger stock solve when trading parameters change
-    ['initialCash', 'marginalSlippage', 'minTrade', 'dailyInterest', 'decayFactor', 'simulationMode', 'forecastNoise'].forEach(id => {
+    ['initialCash', 'buyFactor', 'sellFactor', 'dailyInterest', 'decayFactor', 'simulationMode', 'forecastNoise'].forEach(id => {
         const input = document.getElementById(id);
         if (input) {
             input.addEventListener('change', () => {
@@ -1463,6 +2104,22 @@ function setupEventListeners() {
             });
         }
     });
+
+    // 7. SCHEDULING PARAMETER LISTENERS
+    // NEW: Automatically trigger updates when shift or worker counts change
+    ['shiftLength', 'workerCount'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) {
+            input.addEventListener('change', () => {
+                requestSchedulingSolve();
+            });
+        }
+    });
+
+    // 8. GLOBAL ACTION LISTENERS (Import/Export/Add)
+    if (els.universalExcelInput) {
+        els.universalExcelInput.addEventListener('change', handleUniversalUpload);
+    }
 
     if (els.addProductBtn) {
         els.addProductBtn.addEventListener('click', addProductRow);
@@ -1473,19 +2130,13 @@ function setupEventListeners() {
             e.preventDefault();
             handleExport();
         });
-    } else {
-        const directBtn = document.getElementById('exportBtn');
-        if (directBtn) {
-            directBtn.onclick = handleExport;
-        } else {
-            console.error("Export Button with ID 'exportBtn' not found in DOM");
-        }
     }
 
-    // Attach global update functions to window for HTML onchange attributes
+    // Attach global functions to window for dynamic HTML elements (like table inputs or list items)
     window.updateProductData = updateProductData;
     window.updateDemandData = updateDemandData;
     window.updateOperationalTime = updateOperationalTime;
+    window.selectEmployee = selectEmployee; // Required for clicking names in the Employee scroll list
 }
 
 function setupTopNavigation() {

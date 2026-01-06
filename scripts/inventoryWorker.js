@@ -6,7 +6,8 @@
  * This Web Worker handles the mathematical optimization of a production schedule.
  * It uses the HiGHS solver (via WebAssembly) to solve a Mixed-Integer Linear
  * Programming (MILP) problem.  Using CPLEX Formatting:
- * http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
+ * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
+ * HiGHs Controls: https://dev.ampl.com/solvers/highs/options.html
  * @author Joel Wood
  */
 
@@ -177,7 +178,7 @@ async function solveSteelProductionLP(params) {
     * If the slack variable 's' is in the return, it indicates that (demand exceeds capacity).
      */
     try {
-        const result = highsModule.solve(lpString);
+        const result = highsModule.solve(lpString, { presolve: 'on' });
         const status = result?.Status || "Unknown";
         const cols = result.Columns || {};
 

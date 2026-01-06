@@ -11,6 +11,7 @@
  * purchases impact projections over time.  A Heuristic Validator is used after
  * the LP simulation to remove small transactions and to finalize the solution.
  * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
+ * HiGHs Controls: https://dev.ampl.com/solvers/highs/options.html
  * @author Joel Wood
  */
 
@@ -120,6 +121,7 @@ async function solvePortfolio(params) {
          * PURPOSE: Uses Piecewise Linearization to handle the arithmetic progression.
          * Each tier has an increasing cost for buys and decreasing revenue for sells.
          * This forces the solver to fill the lowest impact tiers first.
+         * This also functions as a constraint to prevent "wash-trading", or same-day trades.
          */
         let cashExpr = `c_${t}`;
         if (t > 0) cashExpr += ` - ${fmt(gamma)} c_${t - 1}`;
@@ -196,17 +198,6 @@ async function solvePortfolio(params) {
                 }
             }
             constraints.push(`ripple_${sKey}_${t}: ${rippleExpr} <= ${fmt(maxVol + 0.5)}`);
-
-            /**============================================================================
-             * SEQUENCING CONSTRAINT (Swing Trading Rule)
-             * ============================================================================
-             * PURPOSE: Prevents same-day trading of stocks and ensures same-day liquidity logic.
-             */
-            if (t === 0) {
-                constraints.push(`seq_${sKey}_${t}: ${sellVars.join(" + ")} <= ${fmt(iH + 0.001)}`);
-            } else {
-                constraints.push(`seq_${sKey}_${t}: ${sellVars.join(" + ")} - h_${sKey}_${t - 1} <= 0.001`);
-            }
         });
 
         constraints.push(`cash_bal_${t}: ${cashExpr} = ${(t === 0) ? fmt(initialCash) : 0}`);
@@ -214,10 +205,10 @@ async function solvePortfolio(params) {
 
     // --- FINALIZING LP CPLEX STRING ---
     const lpString = [
-        ...lpLines,
-        ...constraints,
+        lpLines.join("\n"),
+        constraints.join("\n"),
         "Bounds",
-        ...bounds,
+        bounds.join("\n"),
         "End"
     ].join("\n");
 
