@@ -178,7 +178,7 @@ async function solveSteelProductionLP(params) {
     * If the slack variable 's' is in the return, it indicates that (demand exceeds capacity).
      */
     try {
-        const result = highsModule.solve(lpString, { presolve: 'on' });
+        const result = highsModule.solve(lpString, { time_limit: 10, presolve: 'on' });
         const status = result?.Status || "Unknown";
         const cols = result.Columns || {};
 

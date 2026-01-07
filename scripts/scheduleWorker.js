@@ -98,13 +98,11 @@ function smoothSkillAllocation(roster, demands, skillNames) {
 async function solveSchedulingMILP(params) {
     if (!highsModule) await highsModulePromise;
 
-    const { employees, demands, preferedEmployees } = params;
+    const { employees, demands, preferredEmployees } = params;
     const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
 
     // Workforce Cap: Hard limit on total unique employees scheduled
-    const preferredCount = parseInt(preferedEmployees) || employees.length;
-
-    console.log(`--- SYSTEM: OPTIMIZING (Integrated Continuous Assignment) ---`);
+    const preferredCount = parseInt(preferredEmployees) || employees.length;
 
     // ============================================================================
     // DATA PRE-PROCESSING
@@ -321,7 +319,7 @@ async function solveSchedulingMILP(params) {
 
     // Workforce Cap Constraint
     const allU = employees.map((_, i) => `uEmp_${i}`);
-    constraints.push(` wf_cap: ${allU.join(" + ")} <= ${fmt(pre)}`);
+    constraints.push(` wf_cap: ${allU.join(" + ")} <= ${fmt(preferredCount)}`);
 
     // ============================================================================
     // SOLVE EXECUTION
@@ -333,8 +331,6 @@ async function solveSchedulingMILP(params) {
         "Bounds", continuous.map(c => `${c} >= 0`).join("\n"),
         "End"
     ].join("\n");
-
-    console.log(`--- MODEL STATS: ${binaries.size} Binaries, ${constraints.length} Constraints ---`);
 
     console.time("SolverDuration");
     try {
@@ -409,6 +405,7 @@ async function solveSchedulingMILP(params) {
             result: {
                 roster: finalRoster,
                 objective: result.ObjectiveValue, // Abstract Score
+                overTime: totalOT,
                 actualLaborCost: (totalWages + totalOT).toFixed(2) // Real Labor Costs
             }
         };

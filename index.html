@@ -18,8 +18,10 @@
                 <button class="top-tab-btn active" data-top-tab="inventory">Inventory Optimizer</button>
                 <button class="top-tab-btn" data-top-tab="stocks">Stock Trading Optimizer</button>
                 <button class="top-tab-btn" data-top-tab="scheduling">Scheduling Optimizer</button>
+                <button class="top-tab-btn" data-top-tab="ordering">Ordering Optimizer</button>
             </nav>
         </header>
+
         <div class="main-body">
             <div class="top-tab-content" id="topTabContent">
                 <section id="inventory-panel" class="top-level-panel active">
@@ -91,6 +93,7 @@
                         </div>
                     </main>
                 </section>
+
                 <section id="stocks-panel" class="top-level-panel">
                     <aside class="sidebar left-sidebar">
                         <div class="sidebar-header">
@@ -145,6 +148,7 @@
                         </div>
                     </main>
                 </section>
+
                 <section id="scheduling-panel" class="top-level-panel">
                     <aside class="sidebar left-sidebar">
                         <div class="sidebar-header">
@@ -152,8 +156,8 @@
                         </div>
                         <div class="sidebar-content">
                             <div class="input-group">
-                                <label><strong>Shift Length</strong> (hours)</label>
-                                <input type="number" id="shiftLength" value="100">
+                                <label><strong>Scheduled Employees</strong></label>
+                                <input type="number" id="employeeCount" value="100">
                             </div>
                             <div id="employee-list-container" style="display:none; margin-top: 20px;">
                                 <label><strong>Select Employee</strong></label>
@@ -191,7 +195,7 @@
                         </div>
                         <div id="demands-panel" class="vis-panel">
                             <div class="chart-wrapper">
-                                <h3>Staffing Requirements (By Category)</h3>
+                                <h3>Staffing Requirements (By Skill)</h3>
                                 <div id="demandChartContainer" class="d3-container"></div>
                             </div>
                             <div class="chart-wrapper">
@@ -201,7 +205,25 @@
                         </div>
                     </main>
                 </section>
+
+                <section id="ordering-panel" class="top-level-panel">
+                    <aside class="sidebar left-sidebar">
+                        <div class="sidebar-header">
+                            <h2>Reordering Params</h2>
+                        </div>
+                        <div class="sidebar-content">
+                            <p>Parameters for reorder logic will appear here.</p>
+                        </div>
+                    </aside>
+                    <main class="content-area">
+                        <div class="placeholder-content">
+                            <h3>Ordering Optimizer</h3>
+                            <p>This module isn't built yet.</p>
+                        </div>
+                    </main>
+                </section>
             </div>
+
             <aside class="sidebar right-sidebar" id="right-sidebar">
                 <div class="sidebar-header">
                     <h2>Global Controls</h2>
@@ -209,26 +231,26 @@
                 <div class="sidebar-content">
                     <div class="action-group" style="display:flex; flex-direction:column; gap:10px;">
                         <input type="file" id="universalExcelInput" class="hidden-file-input" accept=".xlsx, .xls">
-                        <button class="btn btn-primary"
-                            onclick="document.getElementById('universalExcelInput').click()">Import Data</button>
+                        <button class="btn btn-primary" onclick="document.getElementById('universalExcelInput').click()">Import Data</button>
                         <button class="btn btn-secondary" id="exportBtn">Export Results</button>
                     </div>
                     <hr style="border:0; border-top:1px solid #444; margin:20px 0;">
                     <div class="kpi-card">
-                        <span class="kpi-label" id="kpiLabel">Total Value</span>
+                        <span class="kpi-label" id="kpiLabel">Total Profit</span>
                         <span class="kpi-value" id="globalObjDisplay">$0.00</span>
                     </div>
                     <div class="kpi-group">
                         <h4>Status</h4>
                         <div id="statusIndicator" class="status-badge ready">Ready</div>
-                        <div id="autoSaveStatus"
-                            style="margin-top:8px; font-size:0.75rem; color:#888; text-align:center; min-height:1rem;">
-                        </div>
                     </div>
                 </div>
             </aside>
         </div>
     </div>
+
+    <script src="scripts/inventory.js"></script>
+    <script src="scripts/stocks.js"></script>
+    <script src="scripts/schedule.js"></script>
     <script src="script.js"></script>
 </body>
 
