@@ -1,6 +1,6 @@
 /* ==========================================================================
-   GLOBAL VARIABLES
-   ========================================================================== */
+   GLOBAL VARIABLES & BASE STYLES
+   ========================================================================== */
 
 :root {
     --primary: #2c3e50;
@@ -25,7 +25,8 @@
     box-sizing: border-box;
 }
 
-body, html {
+body,
+html {
     margin: 0;
     font-family: 'Segoe UI', sans-serif;
     background-color: var(--light-bg);
@@ -46,8 +47,8 @@ body {
 }
 
 /* ==========================================================================
-   APP LAYOUT
-   ========================================================================== */
+   APP SHELL & LAYOUT
+   ========================================================================== */
 
 .app-container {
     display: flex;
@@ -84,10 +85,36 @@ body {
     background-color: #f4f6f7;
 }
 
-/* ==========================================================================
-   NAVIGATION (TOP TABS)
-   ========================================================================== */
+/* Panel Management */
+.top-level-panel {
+    display: none;
+    width: 100%;
+    height: 100%;
+}
 
+.top-level-panel.active {
+    display: flex;
+    flex-direction: row;
+}
+
+.vis-panel {
+    display: none;
+    flex: 1;
+    overflow-y: auto;
+    width: 100%;
+    padding: var(--spacing-lg);
+}
+
+.vis-panel.active {
+    display: flex;
+    flex-direction: column;
+}
+
+/* ==========================================================================
+   NAVIGATION & TABS
+   ========================================================================== */
+
+/* Top Navigation */
 .top-nav-bar {
     display: flex;
     gap: 1.1rem;
@@ -115,16 +142,16 @@ body {
     border-bottom: 3px solid transparent;
 }
 
-    .top-tab-btn:hover {
-        color: var(--light-accent);
-        background-color: var(--secondary);
-    }
+.top-tab-btn:hover {
+    color: var(--light-accent);
+    background-color: var(--secondary);
+}
 
-    .top-tab-btn.active {
-        border-bottom-color: var(--accent);
-    }
+.top-tab-btn.active {
+    border-bottom-color: var(--accent);
+}
 
-/* Sub-tabs within modules */
+/* Module Sub-tabs */
 .tabs {
     background-color: white;
     border-bottom: 1px solid var(--border-color);
@@ -146,22 +173,22 @@ body {
     transition: all 0.2s;
 }
 
-    .tab-btn:hover {
-        color: var(--accent);
-    }
+.tab-btn:hover {
+    color: var(--accent);
+}
 
-    .tab-btn.active {
-        color: var(--accent);
-        border-bottom-color: var(--accent);
-    }
+.tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
 
 /* ==========================================================================
-   SIDEBARS & GLOBAL CONTROLS
-   ========================================================================== */
+   SIDEBARS & GLOBAL CONTROLS
+   ========================================================================== */
 
 .sidebar {
     width: var(--sidebar-width);
-    flex: 0 0 var(--sidebar-width); /* Prevents sidebars from shrinking or growing */
+    flex: 0 0 var(--sidebar-width);
     background-color: white;
     border-right: 1px solid var(--border-color);
     display: flex;
@@ -180,17 +207,154 @@ body {
     border-bottom: 1px solid var(--border-color);
 }
 
-    .sidebar-header h2 {
-        margin: 0;
-        font-size: 1rem;
-        color: var(--secondary);
-    }
+.sidebar-header h2 {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--secondary);
+}
 
 .sidebar-content {
     padding: var(--spacing-md);
 }
 
-/* Global KPIs & Status Scorecards */
+/* Layout Utilities (New) */
+.action-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.sidebar-sub-section {
+    margin-top: 20px;
+}
+
+.sidebar-divider {
+    border: 0;
+    border-top: 1px solid var(--border-color);
+    margin: 20px 0;
+}
+
+/* ==========================================================================
+   TABLES & INPUTS
+   ========================================================================== */
+
+.table-container {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: 0.25rem;
+    overflow: auto;
+    width: 100%;
+    flex: 1;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 0.9rem;
+}
+
+th,
+td {
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+}
+
+th {
+    background-color: var(--secondary);
+    color: white;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+/* Column Widths */
+th:nth-child(1) {
+    width: 5rem;
+}
+
+th:nth-child(n+2):nth-child(-n+6) {
+    width: 4rem;
+}
+
+th:nth-child(n+7) {
+    width: 3.3rem;
+}
+
+td input {
+    width: 100%;
+    border: none;
+    text-align: center;
+    padding: 4px;
+}
+
+.input-group {
+    margin-bottom: var(--spacing-md);
+}
+
+.input-group label {
+    display: block;
+    font-size: 0.85rem;
+    margin-bottom: 0.25rem;
+    color: #666;
+}
+
+.input-group input {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.25rem;
+    font-size: 0.9rem;
+}
+
+.hidden-file-input {
+    display: none;
+}
+
+/* ==========================================================================
+   UI COMPONENTS (BUTTONS & SCORECARDS)
+   ========================================================================== */
+
+.btn {
+    padding: 0.375rem 0.75rem;
+    border: none;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background-color 0.2s;
+}
+
+.btn-primary {
+    background-color: var(--secondary);
+    color: white;
+}
+
+.btn-primary:hover {
+    background-color: var(--primary);
+}
+
+.btn-accent {
+    background-color: var(--accent);
+    color: white;
+}
+
+.btn-accent:hover {
+    background-color: var(--accent-hover);
+}
+
+.btn-secondary {
+    background-color: #95a5a6;
+    color: white;
+}
+
+.btn-secondary:hover {
+    background-color: #7f8c8d;
+}
+
+/* Scorecards & KPIs */
 .kpi-card {
     background: var(--primary);
     color: white;
@@ -215,147 +379,27 @@ body {
     font-size: 0.85rem;
 }
 
-    .status-badge.ready {
-        background: #e0e0e0;
-        color: #555;
-    }
-
-    .status-badge.solving {
-        background: var(--warning);
-        color: white;
-    }
-
-    .status-badge.optimal {
-        background: var(--success);
-        color: white;
-    }
-
-    .status-badge.error {
-        background: var(--danger);
-        color: white;
-    }
-
-/* ==========================================================================
-   DATA TABLES & INPUTS
-   ========================================================================== */
-
-.table-container {
-    background: white;
-    border: 1px solid var(--border-color);
-    border-radius: 0.25rem;
-    overflow: auto;
-    width: 100%;
-    flex: 1;
+.status-badge.ready {
+    background: #e0e0e0;
+    color: #555;
 }
 
-table {
-    width: 100%;
-    border-collapse: collapse;
-    table-layout: fixed;
-    font-size: 0.9rem;
-}
-
-th, td {
-    padding: 0.5rem;
-    border: 1px solid var(--border-color);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: center;
-}
-
-th {
-    background-color: var(--secondary);
-    color: white;
-    position: sticky;
-    top: 0;
-    z-index: 10;
-}
-
-    /* Product Name */
-    th:nth-child(1) {
-        width: 5rem;
-    }
-
-    /* Costs/Times */
-    th:nth-child(n+2):nth-child(-n+6) {
-        width: 4rem;
-    }
-
-    /* Mon-Sun */
-    th:nth-child(n+7) {
-        width: 3.3rem;
-    }
-
-td input {
-    width: 100%;
-    border: none;
-    text-align: center;
-    padding: 4px;
-}
-
-.input-group {
-    margin-bottom: var(--spacing-md);
-}
-
-    .input-group label {
-        display: block;
-        font-size: 0.85rem;
-        margin-bottom: 0.25rem;
-        color: #666;
-    }
-
-    .input-group input {
-        width: 100%;
-        padding: 0.5rem;
-        border: 1px solid var(--border-color);
-        border-radius: 0.25rem;
-        font-size: 0.9rem;
-    }
-
-.hidden-file-input {
-    display: none;
-}
-
-/* ==========================================================================
-   UI COMPONENTS (BUTTONS & TOOLTIPS)
-   ========================================================================== */
-
-.btn {
-    padding: 0.375rem 0.75rem;
-    border: none;
-    border-radius: 0.25rem;
-    cursor: pointer;
-    font-size: 0.9rem;
-    transition: background-color 0.2s;
-}
-
-.btn-primary {
-    background-color: var(--secondary);
+.status-badge.solving {
+    background: var(--warning);
     color: white;
 }
 
-    .btn-primary:hover {
-        background-color: var(--primary);
-    }
-
-.btn-accent {
-    background-color: var(--accent);
+.status-badge.optimal {
+    background: var(--success);
     color: white;
 }
 
-    .btn-accent:hover {
-        background-color: var(--accent-hover);
-    }
-
-.btn-secondary {
-    background-color: #95a5a6;
+.status-badge.error {
+    background: var(--danger);
     color: white;
 }
 
-    .btn-secondary:hover {
-        background-color: #7f8c8d;
-    }
-
+/* Tooltips (Updated with layout classes) */
 .d3-tooltip {
     position: absolute;
     padding: 0.5rem 0.75rem;
@@ -370,33 +414,28 @@ td input {
     transition: opacity 0.1s ease;
 }
 
+.tooltip-header {
+    font-weight: bold;
+    border-bottom: 1px solid #555;
+    margin-bottom: 5px;
+}
+
+.tooltip-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 15px;
+    margin-bottom: 2px;
+}
+
+.tooltip-block {
+    margin-top: 8px;
+    padding-top: 5px;
+    border-top: 1px solid #444;
+}
+
 /* ==========================================================================
-   D3 VISUALIZATIONS & CHARTS
-   ========================================================================== */
-
-.top-level-panel {
-    display: none;
-    width: 100%;
-    height: 100%;
-}
-
-    .top-level-panel.active {
-        display: flex;
-        flex-direction: row;
-    }
-
-.vis-panel {
-    display: none;
-    flex: 1;
-    overflow-y: auto;
-    width: 100%;
-    padding: var(--spacing-lg);
-}
-
-    .vis-panel.active {
-        display: flex;
-        flex-direction: column;
-    }
+   D3 VISUALIZATION CORE STYLES
+   ========================================================================== */
 
 .chart-wrapper {
     background: white;
@@ -420,8 +459,34 @@ td input {
     position: relative;
 }
 
-/* Shared Legend Styling (from script.js refactor) */
-#sharedLegend, #sharedStockLegend, #rosterLegend {
+/* Chart Element Styles */
+.capacity-line {
+    stroke: var(--danger);
+    stroke-width: 0.2rem;
+    stroke-dasharray: 5, 5;
+}
+
+.chart-line {
+    fill: none;
+    stroke-width: 0.3rem;
+}
+
+.zero-line {
+    stroke: #666;
+    stroke-width: 1px;
+    opacity: 0.8;
+}
+
+svg text {
+    font-size: 0.75rem;
+    fill: #555;
+}
+
+/* Legend Utilities */
+#sharedLegend,
+#sharedStockLegend,
+#rosterLegend,
+.legend-container {
     width: 100%;
     min-height: 2.5rem;
     margin-bottom: var(--spacing-sm);
@@ -452,33 +517,23 @@ td input {
     font-weight: 500;
 }
 
-/* Chart Elements */
-.capacity-line {
-    stroke: var(--danger);
-    stroke-width: 0.2rem;
-    stroke-dasharray: 5, 5;
+/* ==========================================================================
+   TAB EXCLUSIVE: STOCK TRADING
+   ========================================================================== */
+
+.buy-block {
+    color: #2ecc71;
 }
 
-.chart-line {
-    fill: none;
-    stroke-width: 0.3rem;
-}
-
-.zero-line {
-    stroke: #666;
-    stroke-width: 1px;
-    opacity: 0.8;
-}
-
-svg text {
-    font-size: 0.75rem;
-    fill: #555;
+.sell-block {
+    color: #e74c3c;
 }
 
 /* ==========================================================================
-   SCHEDULING MODULE
-   ========================================================================== */
+   TAB EXCLUSIVE: SCHEDULING MODULE
+   ========================================================================== */
 
+/* Employee Profiles & Lists */
 .employee-details-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -500,6 +555,17 @@ svg text {
     grid-column: 1 / -1;
 }
 
+#employeeSearch {
+    width: 100%;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    outline: none;
+}
+
+#employeeSearch:focus {
+    border-color: var(--accent);
+}
+
 .scrollable-list {
     max-height: 400px;
     overflow-y: auto;
@@ -513,15 +579,15 @@ svg text {
     border-bottom: 1px solid #eee;
 }
 
-    .emp-item:hover {
-        background: #f8f9fa;
-    }
+.emp-item:hover {
+    background: #f8f9fa;
+}
 
-    .emp-item.active {
-        background-color: var(--accent);
-        color: white;
-        font-weight: bold;
-    }
+.emp-item.active {
+    background-color: var(--accent);
+    color: white;
+    font-weight: bold;
+}
 
 .profile-grid {
     display: grid;
@@ -537,11 +603,12 @@ svg text {
     border-collapse: collapse;
 }
 
-    .availability-table td {
-        padding: 8px;
-        border-bottom: 1px solid #eee;
-    }
+.availability-table td {
+    padding: 8px;
+    border-bottom: 1px solid #eee;
+}
 
+/* Solver Visualization */
 .solver-dashboard {
     padding: 40px;
     text-align: center;
@@ -567,15 +634,92 @@ svg text {
     text-align: left;
 }
 
-    .metrics-table td {
-        padding: 8px 0;
-        border-bottom: 1px solid #f0f0f0;
-        font-size: 0.9rem;
-        color: #555;
-        text-align: center;
-    }
+.metrics-table td {
+    padding: 8px 0;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 0.9rem;
+    color: #555;
+    text-align: center;
+}
 
-        .metrics-table td:last-child {
-            font-weight: 600;
-            color: #2980b9;
-        }
+.metrics-table td:last-child {
+    font-weight: 600;
+    color: #2980b9;
+}
+
+/* Roster Analytics Dashboard */
+.roster-split-view {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+}
+
+.roster-visual-column {
+    flex: 2;
+}
+
+.roster-stats-column {
+    flex: 1;
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.stats-card {
+    background: white;
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid #eee;
+}
+
+.stats-label {
+    font-size: 0.7rem;
+    font-weight: bold;
+    color: #888;
+}
+
+.stats-value {
+    font-size: 0.9rem;
+    font-weight: bold;
+    color: var(--primary);
+}
+
+.kpi-split-row {
+    grid-column: span 1;
+    background: #f8f9fa;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    display: flex;
+    overflow: hidden;
+}
+
+.kpi-split-item {
+    flex: 1;
+    padding: 8px;
+    text-align: center;
+}
+
+.border-right {
+    border-right: 1px solid #ddd;
+}
+
+.opportunity-card {
+    margin-bottom: 10px;
+    padding: 10px;
+    background: white;
+    border: 1px solid #ddd;
+    border-left: 6px solid var(--accent);
+    border-radius: 4px;
+}
+
+.opportunity-card.critical {
+    background: #fdedec;
+    border-left-color: var(--danger);
+}

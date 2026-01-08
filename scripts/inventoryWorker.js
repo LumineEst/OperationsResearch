@@ -1,5 +1,4 @@
-/**
- * ==============================================================================
+/**==============================================================================
  * Highs Solver Worker - MILP Optimization for Steel Production (Memory-Hardened)
  * ==============================================================================
  * * Description:
@@ -51,6 +50,31 @@ function fmt(num) {
 // ------------------------------------------------------------------------
 // BUILD LP STRING
 // ------------------------------------------------------------------------
+/** The main function of the Inventory Worker is to take a set of product data,
+ * and their corresponding demand, and generate an optimal production plan.  The problem being
+ * solved is to decide how much of each product to manufacture, given a fixed set of resources, 
+ * and a set of known demands. The problem is formulated as a linear programming (LP) problem, 
+ * using a Big-M, or Penalty approach to handling the constraints.  Using the Highs.js library, 
+ * a high-performance solver for linear programming problems, the solver executes in two-phases 
+ * First constructing the LP CPLEX string, executing the solver, then parsing detailed results.
+ * @param {Object} params - The input parameters for the solver.
+ * @param {Array<Object>} params.products - The list of products to be produced.
+ * @param {number} params.rawSteelCost - The cost per ton of raw steel.
+ * @param {number} params.invCost - The cost per ton of inventory.
+ * @param {number} params.maxCapacity - The maximum capacity of the factory per day.
+ * @param {number} params.backorderPenalty - The penalty rate for backordered items as a percentage.
+ * @param {Array<number>} params.operationalTime - The daily operational time available for production.
+ * @param {Array<number>} params.demand - The demand per product for each day of the week.
+ * @returns {Promise<Object>}
+ * @property {string} result.status - The status of the solution: 'Optimal' or 'Infeasible'
+ * @property {number} result.objectiveValue - The objective function value of the solution.
+ * @property {Array<Object>} result.details - The detailed results of the solution.
+ * @property {string} result.details[i].product - The name of the product.
+ * @property {Array<number>} result.details[i].produced - The units of the product produced each day.
+ * @property {Array<number>} result.details[i].sold - The units of the product sold each day.
+ * @property {Array<number>} result.details[i].inventory - The units of the product left in inventory each day.
+ * @property {Array<number>} result.details[i].backorder - The units of the product backordered each day.
+ */
 async function solveSteelProductionLP(params) {
     // Safety Check for Highs Module being loaded
     if (!highsModule) {
@@ -89,8 +113,7 @@ async function solveSteelProductionLP(params) {
             // For each day of the week, parse the anticipate Demand in tons
             const dem = parseFloat(p.demand[j]) || 0;
 
-            /**
-            * OBJECTIVE FUNCTION CONSTRUCTION
+            /**OBJECTIVE FUNCTION CONSTRUCTION
             * Mathematical Construct: Z = Σ (Revenue) - Σ (Costs)
             * i_{i}_{j} : Inventory of product i held at end of day j
             * bo_{i}_{j} : Backorder (unmet demand) of product i on day j
@@ -104,8 +127,7 @@ async function solveSteelProductionLP(params) {
             if (p.changeOverCost > 0) objTerms.push(`-${fmt(p.changeOverCost)} b_${i}_${j}`); // Changeover Cost: Binary fixed cost
             objTerms.push(`-${fmt(SLACK_PENALTY)} s_${i}_${j}`); // Slack Penalty: Penalty to mitigate mathematical infeasibility
 
-            /**
-            * PRODUCTION BALANCE/FLOW CONSTRAINT
+            /**PRODUCTION BALANCE/FLOW CONSTRAINT
             * Ensures that: Produced + Slack + (Prev Inv) + (Current Backorder) = (Current Demand) + (Current Inv) + (Prev Backorder)
             * Which creates continuity between days, unifying daily constraints across the week.
             * Formula: p + s - i + bo + i(prev) - bo(prev) = demand
@@ -114,16 +136,14 @@ async function solveSteelProductionLP(params) {
             if (j > 0) bal += ` + i_${i}_${j - 1} - bo_${i}_${j - 1}`;  // Handles First Day lack of priors
             constraints.push(` c_bal_${i}_${j}: ${bal} = ${fmt(dem)}`);
 
-            /**
-             * BINARY SETUP LINKING (Indicator Variable)
+            /**BINARY SETUP LINKING (Indicator Variable)
              * Links production volume (p) to the binary changeover variable (b).
              * p <= maxCapacity * b.  If b=0, production must be 0. If b=1, production is allowed up to max.
              */
             constraints.push(` c_link_${i}_${j}: p_${i}_${j} - ${fmt(maxCapacity)} b_${i}_${j} <= 0`);
             binaries.push(`b_${i}_${j}`);
 
-            /**
-             * END-OF-WEEK BACKORDER CONSTRAINT
+            /**END-OF-WEEK BACKORDER CONSTRAINT
              * Forces backorders to zero on the last day to ensure all demand
              * is eventually satisfied by the end of the simulation.
              */
@@ -131,8 +151,7 @@ async function solveSteelProductionLP(params) {
         }
     }
 
-    /**
-     * OPERATIONAL AVAILABILITY
+    /**OPERATIONAL AVAILABILITY
      * Calculates the available production time based on Change-Over and Cycle Times for each Product and Day
      */
     for (let j = 0; j < daysCount; j++) {
@@ -146,14 +165,12 @@ async function solveSteelProductionLP(params) {
             if (p.changeOverTime > 0) dayTime.push(`${fmt(p.changeOverTime * 60)} b_${i}_${j}`);
         }
 
-        /**
-         * MATERIAL CAPACITY CONSTRAINT
+        /**MATERIAL CAPACITY CONSTRAINT
          * Total units of all products on day j cannot exceed maxCapacity.
          */
         if (dayProd.length > 0) constraints.push(` c_cap_${j}: ${dayProd.join(" + ")} <= ${fmt(maxCapacity)}`);
         
-        /**
-         * OPERATIONAL TIME CONSTRAINT
+        /**OPERATIONAL TIME CONSTRAINT
          * Sum of (Production Time + Changeover Time) <= available Operational Time (seconds).
          */
         if (dayTime.length > 0) constraints.push(` c_time_${j}: ${dayTime.join(" + ")} <= ${fmt(availSec)}`);
@@ -173,9 +190,8 @@ async function solveSteelProductionLP(params) {
     // Garbage Collection
     objTerms = null; constraints = null; binaries = null;
 
-    /**
-    * SOLVER EXECUTION & TWO-PHASE METHOD INTERPRETATION
-    * If the slack variable 's' is in the return, it indicates that (demand exceeds capacity).
+    /**SOLVER EXECUTION & TWO-PHASE METHOD INTERPRETATION
+     * If the slack variable 's' is in the return, it indicates that (demand exceeds capacity).
      */
     try {
         const result = highsModule.solve(lpString, { time_limit: 10, presolve: 'on' });
@@ -225,10 +241,18 @@ async function solveSteelProductionLP(params) {
 // ------------------------------------------------------------------------
 // MESSAGE HANDLER
 // ------------------------------------------------------------------------
+// This function is the entry point for the web worker. It's invoked when the
+// main thread sends a message to the worker. 
+// ------------------------------------------------------------------------
 self.onmessage = async function (e) {
+    // Extract the type and data from the message that the main thread sent.
     const { type, data } = e.data;
+    // If 'solve', send the LP problem data to the solver and process the results.
     if (type === 'solve') {
+        // Call the solver with the LP problem data and wait for the result.
         const output = await solveSteelProductionLP(data);
-        self.postMessage({ type: 'result', ...output });
+        // Post a message back to the main thread with the result data;
+        // The spread operator (...) merges the result object with the type field
+        self.postMessage({ type: 'result', ...output }); 
     }
 };

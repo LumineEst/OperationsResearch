@@ -54,6 +54,25 @@ function fmt(num) {
 // ============================================================================
 // BUILD LP STRING (CPLEX FORMAT)
 // ============================================================================
+/**The following code is an implementation of a Portfolio Optimization
+ * problem using a linear programming (LP) solver and a heuristic simulation.
+ * The LP formulation optimizes a set of decision variables, which represent
+ * the number of shares of each stock to buy or sell at each point in time.
+ * The heuristic simulation runs through the solution and prunes any trades
+ * with a marginal cost below a given threshold, and re-runs the simulation,
+ * to produce an actionable plan.  The problem is formulated as follows:
+ * - Maximize the final wealth, accounting for all possible transactions and
+ * their associated costs, including transaction fees and possible holding fees.
+ * - Constraints:
+ * - Each stock's holdings should be non-negative.
+ * - The cash balance at the end of each day should be non-negative.
+ * - The inventory balance at the end of each day should be zero.
+ * - Each stock's inventory at the end of each day should be zero.
+ * - Each stock's inventory balance follows a decaying pattern, based on an
+ *   Exponential Moving Average, to simulate market impact over successive days.
+ * - The LP formulation represents an approximation to the problem, and the heuristic
+ * simulation provides an exact value from the linearization of the problem.
+ */
 async function solvePortfolio(params) {
     const {
         prices, initialCash, initialHoldings,
@@ -228,40 +247,51 @@ async function solvePortfolio(params) {
          * The LP model uses a piecewise approximation of the marginal slippage of costs
          * to avoid a computationally intensive Quadratic model, this gives an approximation 
          * with around 0.1% error.  Additionally, adding firm limits on minimum transactions
-         * would significantly increases computational complexity.  As such, parsing is
+         * would significantly increase computational complexity.  As such, parsing is
          * best done after solving, where minor error is introduced in exchange for
          * computational feasibility.  This error is often less than that accrued from
          * linearization of the actual Arithmetic Progression Sum: Cost = λ * (V + 1) / 2
+         *
+         * @param {boolean} prune - If true, trades with a marginal cost below the given
+         *     CASH_THRESHOLD are discarded.
+         * @returns {Object} result - An object containing the Net Asset Value (nav) and the
+         *     simulation logs.
          */
         const runSimulation = (prune = false) => {
+            // CASH_THRESHOLD is the minimum trade value, below which trades are disregarded
             const CASH_THRESHOLD = parseFloat(minTrade) || 1000;
-            let simCash = initialCash;
-            let simHoldings = {};
+            let simCash = initialCash; // Simulated cash on hand
+            let simHoldings = {}; // Simulated holdings of each stock
             stocks.forEach(s => {
                 simHoldings[s] = parseFloat(initialHoldings ? initialHoldings[s] : 0) || 0;
             });
 
-            let logs = [];
+            let logs = []; // Simulation logs
             for (let t = 0; t < T; t++) {
                 // --- APPLY INTEREST ON STARTING CASH ---
+                // The amount of cash we have at the beginning of the day, after applying interest
                 if (t > 0) simCash *= gamma;
                 let log = { dayIdx: t, buys: {}, sells: {}, stockValues: {}, cashHeld: 0, totalValue: 0 };
-                let dailyTrades = [];
+                let dailyTrades = []; // Trades made on this day
 
                 stocks.forEach(stock => {
                     const sKey = stock.replace(/\s+/g, '_');
-                    const pr = parseFloat(prices[t][stock]) || 0;
+                    const pr = parseFloat(prices[t][stock]) || 0; // Price of this stock today
 
                     let bS = 0; let sS = 0;
+                    // Sum the solution values of this stock for each tier
                     for (let n = 0; n < NUM_TIERS; n++) {
                         bS += cols[`b_${sKey}_${t}_t${n}`]?.Primal || 0;
                         sS += cols[`s_${sKey}_${t}_t${n}`]?.Primal || 0;
                     }
 
                     // --- REMOVE TRIVIAL TRADES ---
+                    // If the total value of trades for this stock is below the threshold,
+                    // disregard these trades
                     if (prune && (bS + sS) * pr < CASH_THRESHOLD) { bS = 0; sS = 0; }
 
                     if (bS > 0.01 || sS > 0.01) {
+                        // If there are trades for this stock, record them for this day
                         dailyTrades.push({ stock, bS, sS, pr });
                         if (bS > 0.01) log.buys[stock] = bS;
                         if (sS > 0.01) log.sells[stock] = sS;
@@ -269,19 +299,25 @@ async function solvePortfolio(params) {
                 });
 
                 // --- LIQUIDITY RECYCLING: SELLS FIRST ---
+                // Execute sell trades, apply fees
                 dailyTrades.forEach(tr => {
                     if (tr.sS > 0) {
                         const fee = (lambda * (tr.sS + 1)) / 2;
+                        // Reduce the simulated holdings for this stock
                         simHoldings[tr.stock] -= tr.sS;
+                        // Increase the simulated cash for this stock
                         simCash += (tr.sS * (tr.pr - fee));
                     }
                 });
 
                 // --- LIQUIDITY RECYCLING: BUYS SECOND ---
+                // Execute buy trades, apply fees
                 dailyTrades.forEach(tr => {
                     if (tr.bS > 0) {
                         const fee = (lambda * (tr.bS + 1)) / 2;
+                        // Increase the simulated holdings for this stock
                         simHoldings[tr.stock] += tr.bS;
+                        // Decrease the simulated cash for this stock
                         simCash -= (tr.bS * (tr.pr + fee));
                     }
                 });
@@ -332,11 +368,18 @@ async function solvePortfolio(params) {
 // ------------------------------------------------------------------------
 // MESSAGE HANDLER
 // ------------------------------------------------------------------------
+// This function is the entry point for the web worker. It's invoked when the
+// main thread sends a message to the worker. 
+// ------------------------------------------------------------------------
 self.onmessage = async function (e) {
+    // Extract the type and data from the message that the main thread sent.
     const { type, data } = e.data;
+    // If 'solve', send the LP problem data to the solver and process the results.
     if (type === 'solve') {
-        if (!highsModule) await highsModulePromise;
+        // Call the solver with the LP problem data and wait for the result.
         const output = await solvePortfolio(data);
-        self.postMessage({ type: 'result', ...output });
+        // Post a message back to the main thread with the result data;
+        // The spread operator (...) merges the result object with the type field
+        self.postMessage({ type: 'result', ...output }); 
     }
 };

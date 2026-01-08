@@ -95,6 +95,22 @@ function smoothSkillAllocation(roster, demands, skillNames) {
 // ============================================================================
 // BUILD LP STRING & SOLVE
 // ============================================================================
+/**This function builds a CPLEX LP string and finds a near-optimal solution within
+ * 5-minutes before time-out.  It then takes this allocation of employees by role
+ * and hour and smooths it out using a greedy heuristic.  It takes the output of 
+ * the optimization problem and re-allocates employees between roles in order to 
+ * smooth out any over- or under-allocation of roles and skills.
+ * The goal is to make the schedule as even as possible. This is done by
+ * re-allocating employees from over-allocated skills and roles to
+ * under-allocated skills and roles, spreading surplus labor is as even as possible.
+ * This is computationally light and exactness is not critical for smoothness
+ * So it is best handled post-solve, rather than increasing the complexity of
+ * the financially motivated LP Solver.
+ * @param {Array} roster - The list of employees and their schedules.
+ * @param {Array} demands - The list of roles and their demand at each time step.
+ * @param {Array} skillNames - The list of skill names.
+ * @returns {Array} The smoothed roster.
+ */
 async function solveSchedulingMILP(params) {
     if (!highsModule) await highsModulePromise;
 
@@ -419,9 +435,18 @@ async function solveSchedulingMILP(params) {
 // ------------------------------------------------------------------------
 // MESSAGE HANDLER
 // ------------------------------------------------------------------------
-self.onmessage = async (e) => {
-    if (e.data.type === 'solve') {
-        const output = await solveSchedulingMILP(e.data.data);
-        self.postMessage({ type: 'result', ...output });
+// This function is the entry point for the web worker. It's invoked when the
+// main thread sends a message to the worker. 
+// ------------------------------------------------------------------------
+self.onmessage = async function (e) {
+    // Extract the type and data from the message that the main thread sent.
+    const { type, data } = e.data;
+    // If 'solve', send the LP problem data to the solver and process the results.
+    if (type === 'solve') {
+        // Call the solver with the LP problem data and wait for the result.
+        const output = await solveSchedulingMILP(data);
+        // Post a message back to the main thread with the result data;
+        // The spread operator (...) merges the result object with the type field
+        self.postMessage({ type: 'result', ...output }); 
     }
 };
