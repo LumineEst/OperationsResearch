@@ -445,22 +445,10 @@ window.InventoryModule = {
      * The chart also displays a dotted horizontal line representing the total capacity of the factory.
      */
     drawProductionChart() {
-        const container = document.getElementById('productionChartContainer'); // Clear the main container element
-        if (!container || !window.systemState.results) return; // Abort if container is not available or data is missing
-        container.innerHTML = '';
+        const chart = window.initChart('productionChartContainer');
+        if (!chart || !window.systemState.results) return;
 
-        // Set the dimensions of the chart based on the container size
-        const rect = container.getBoundingClientRect();
-        const margin = { top: 10, right: 30, bottom: 30, left: 50 };
-        const width = rect.width - margin.left - margin.right;
-        const height = rect.height - margin.top - margin.bottom;
-
-        // Create a D3 SVG element inside the container, with the specified viewBox
-        const svg = d3.select(container).append("svg")
-            .attr("width", "100%").attr("height", "100%")
-            .attr("viewBox", `0 0 ${rect.width} ${rect.height}`)
-            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
-
+        const { svg, width, height } = chart;
         // Prepare and map the aggregated data for the stacked bar chart
 
         const stackData = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, i) => {
@@ -509,21 +497,10 @@ window.InventoryModule = {
     /**Renders a multi-line chart depicting ending inventory levels and backorder penalties across days of the week.
      */
     drawInventoryChart() {
-        const container = document.getElementById('inventoryChartContainer'); // Clear the main container element
-        if (!container || !window.systemState.results) return; // Abort if container is not available or data is missing
-        container.innerHTML = '';
+        const chart = window.initChart('inventoryChartContainer');
+        if (!chart || !window.systemState.results) return;
 
-        // Calculate the size of the SVG chart
-        const rect = container.getBoundingClientRect();
-        const margin = { top: 10, right: 30, bottom: 30, left: 50 };
-        const width = rect.width - margin.left - margin.right;
-        const height = rect.height - margin.top - margin.bottom;
-
-        // Create the main SVG element and append it to the container
-        const svg = d3.select(container).append("svg")
-            .attr("width", "100%").attr("height", "100%")
-            .attr("viewBox", `0 0 ${rect.width} ${rect.height}`)
-            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        const { svg, width, height } = chart;
 
         // Define the axes
         const daysArr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];

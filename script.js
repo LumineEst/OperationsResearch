@@ -10,7 +10,26 @@ window.stockState = { prices: [], stocks: [], results: null };
 window.schedState = { employees: [], demands: [], selectedEmpId: null, results: null, solverTimeLeft: 0 };
 window.currentWorker = null;
 window.days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-window.monthNames = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+window.monthNames = ["", "Jan", "Feb", "Mar", "Apr", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec"];
+
+// --- MODULE REGISTRY ---
+const moduleRegistry = {
+    inventory: {
+        label: "Total Profit",
+        getResult: () => window.systemState.results?.objectiveValue,
+        draw: () => window.InventoryModule.drawCharts()
+    },
+    stocks: {
+        label: "Final Portfolio Value",
+        getResult: () => window.stockState.results?.finalPortfolioValue,
+        draw: () => window.StocksModule.drawCharts()
+    },
+    scheduling: {
+        label: "Labor Cost",
+        getResult: () => window.schedState.results?.actualLaborCost || window.schedState.results?.objective,
+        draw: () => window.ScheduleModule.drawCharts()
+    }
+};
 
 // --- INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -97,51 +116,15 @@ function animateValue(element, end, duration, formatter) {
  * value displays, and charts for that tab.
  */
 function updateResultsUI() {
-    // Get the active tab from the global navigation
     const activeTab = document.querySelector('.top-tab-btn.active')?.dataset.topTab;
-
-    // Get the global results display and the KPI label
+    const config = moduleRegistry[activeTab];
     const display = document.getElementById('globalObjDisplay');
     const label = document.getElementById('kpiLabel');
 
-    // Update the display for inventory, stocks, or scheduling based on the active tab
-
-    // Inventory
-    if (activeTab === 'inventory' && window.systemState.results) {
-        if (label) label.textContent = "Total Profit"; // Set the KPI label to "Total Profit"
-
-        // Animate the display of the objective value, formatted as a currency string
-        animateValue(display, window.systemState.results.objectiveValue, 200, (v) =>
-            v.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }));
-
-        // Draw the charts for the inventory
-        window.InventoryModule.drawCharts();
-    }
-
-    // Stocks
-    else if (activeTab === 'stocks' && window.stockState.results) {
-        if (label) label.textContent = "Final Portfolio Value"; // Set the KPI label to "Final Portfolio Value"
-
-        // Animate the display of the final portfolio value, formatted as a currency string
-        animateValue(display, Math.round(window.stockState.results.finalPortfolioValue), 400, (v) =>
-            Math.round(v).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }));
-
-        // Draw the charts for the stocks
-        window.StocksModule.drawCharts();
-    }
-
-    // Scheduling
-    else if (activeTab === 'scheduling' && window.schedState.results) {
-        if (label) label.textContent = "Labor Cost"; // Set the KPI label to "Labor Cost"
-        // Convert solver score to labor cost (removing penalty weights if necessary)
-        const cost = window.schedState.results.actualLaborCost || window.schedState.results.objective;
-
-        // Animate the display of the labor cost, formatted as a currency string
-        animateValue(display, cost, 400, (v) =>
-            v.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }));
-
-        // Draw the charts for the scheduling
-        window.ScheduleModule.drawCharts();
+    if (config && config.getResult()) {
+        if (label) label.textContent = config.label;
+        animateValue(display, config.getResult(), 400, formatCurrency);
+        config.draw();
     }
 }
 
@@ -260,6 +243,37 @@ function setupGlobalNavigation() {
             }
         });
     });
+
+    /**Global Chart Utility
+     * Used for getting container dimenstions and initializing the SVG within each tab
+     */
+    window.initChart = function (containerId, marginOverride = {}, useViewBox = true) {
+        const container = document.getElementById(containerId);
+        if (!container) return null;
+        container.innerHTML = '';
+
+        const rect = container.getBoundingClientRect();
+        const margin = { top: 10, right: 30, bottom: 30, left: 50, ...marginOverride };
+        const width = rect.width - margin.left - margin.right;
+        const height = rect.height - margin.top - margin.bottom;
+        if (width <= 0 || height <= 0) return null;
+
+        container.innerHTML = '';
+        container.innerHTML = '';
+        const svgEl = d3.select(container).append("svg")
+            .style("display", "block") // Fixes orientation/text-align issues
+            .attr("width", rect.width)
+            .attr("height", rect.height);
+
+        // For charts that grow vertically, we skip the height-constrained viewBox
+        if (useViewBox) {
+            svgEl.attr("viewBox", `0 0 ${rect.width} ${rect.height}`);
+        }
+
+        const svg = svgEl.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+        return { svg, width, height, margin };
+    };
 
     /**Event listener for the import file button.
      * @param {MouseEvent} e The click event that triggered the function.

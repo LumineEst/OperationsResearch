@@ -139,7 +139,8 @@ async function solvePortfolio(params) {
          * Equation: c_t - (c_t-1 * γ) + Σ(Σ b_i,t,n * effBuy_n) - Σ(Σ s_i,t,n * effSell_n) = 0
          * PURPOSE: Uses Piecewise Linearization to handle the arithmetic progression.
          * Each tier has an increasing cost for buys and decreasing revenue for sells.
-         * This forces the solver to fill the lowest impact tiers first.
+         * This forces the solver to fill the lowest impact tiers first, effectively
+         * approximating the integral of the marginal cost function linearly.
          * This also functions as a constraint to prevent "wash-trading", or same-day trades.
          */
         let cashExpr = `c_${t}`;
@@ -201,6 +202,9 @@ async function solvePortfolio(params) {
              * Equation: Σ (Volume_t-k * φ^k) <= ShareCap
              * PURPOSE: Simulates Market Impact over successive days on Trading, based on an EMA
              * (Exponential Moving Average) in which weakening ripples move through successive days.
+             * A large trade today reduces the available liquidity for several days. 
+             * Mathematically, this is a convolution constraint that limits the 
+             * weighted moving average of trade volume to prevent market disruption.
              */
             const DECAY_PERIOD = 21; // 3 weeks
             let rippleExpr = `${buyVars.join(" + ")} + ${sellVars.join(" + ")}`;
@@ -243,98 +247,174 @@ async function solvePortfolio(params) {
         /**============================================================================
          * DISCRETE HEURISTIC PRUNING:
          * ============================================================================
-         * This takes solution values above a threshold and output an exact solution.
+         * This takes solution values above a threshold and outputs an exact solution.
          * The LP model uses a piecewise approximation of the marginal slippage of costs
          * to avoid a computationally intensive Quadratic model, this gives an approximation 
-         * with around 0.1% error.  Additionally, adding firm limits on minimum transactions
+         * with around 0.5% error.  Additionally, adding firm limits on minimum transactions
          * would significantly increase computational complexity.  As such, parsing is
          * best done after solving, where minor error is introduced in exchange for
-         * computational feasibility.  This error is often less than that accrued from
+         * computational feasibility.  This evaluates the 'trivial trades' from least to
+         * greatest value, and performs a safety check to ensure cumulative prunes do not
+         * violate the future cash or portfolio inventory floors.  The error of this trim
          * linearization of the actual Arithmetic Progression Sum: Cost = λ * (V + 1) / 2
-         *
+         * is often a fraction of a percent.
          * @param {boolean} prune - If true, trades with a marginal cost below the given
-         *     CASH_THRESHOLD are discarded.
-         * @returns {Object} result - An object containing the Net Asset Value (nav) and the
-         *     simulation logs.
+         *                          CASH_THRESHOLD are discarded.  (If safe to do so)
          */
-        const runSimulation = (prune = false) => {
-            // CASH_THRESHOLD is the minimum trade value, below which trades are disregarded
+        const runSimulation = (applyPruning = false) => {
+            // Determine the threshold for "trivial" trades based on user input
             const CASH_THRESHOLD = parseFloat(minTrade) || 1000;
-            let simCash = initialCash; // Simulated cash on hand
-            let simHoldings = {}; // Simulated holdings of each stock
-            stocks.forEach(s => {
-                simHoldings[s] = parseFloat(initialHoldings ? initialHoldings[s] : 0) || 0;
-            });
 
-            let logs = []; // Simulation logs
+            // Fee logic mirrors the discrete arithmetic progression: λ * (V + 1) / 2
+            const marginalSlip = (shares) => (lambda * (shares + 1)) / 2;
+
+            /**
+             * PASS-THROUGH SIMULATION ENGINE
+             * Performs a deterministic simulation of the portfolio based on solver primals.
+             * @param {Set} pruneSet - A set of "Stock_Day_Type" keys to exclude from simulation.
+             */
+            const executeSimulation = (pruneSet) => {
+                let simCash = initialCash;
+                let simHoldings = {};
+                stocks.forEach(s => simHoldings[s] = parseFloat(initialHoldings ? initialHoldings[s] : 0) || 0);
+
+                let logs = [];
+                let path = { cash: new Float64Array(T), inventory: {} };
+                stocks.forEach(s => path.inventory[s] = new Float64Array(T));
+
+                for (let t = 0; t < T; t++) {
+                    // Apply daily interest/carry to cash at start of day
+                    if (t > 0) simCash *= gamma;
+
+                    let log = { dayIdx: t, buys: {}, sells: {}, stockValues: {}, cashHeld: 0, totalValue: 0 };
+                    let daySells = [];
+                    let dayBuys = [];
+
+                    stocks.forEach(stock => {
+                        const sKey = stock.replace(/\s+/g, '_');
+                        const pr = parseFloat(prices[t][stock]) || 0;
+                        let bS = 0, sS = 0;
+
+                        // Aggregate Primal values across tiers from the solver result
+                        for (let n = 0; n < NUM_TIERS; n++) {
+                            bS += (cols[`b_${sKey}_${t}_t${n}`]?.Primal || 0);
+                            sS += (cols[`s_${sKey}_${t}_t${n}`]?.Primal || 0);
+                        }
+
+                        // Check if this specific trade should be pruned
+                        if (pruneSet.has(`${stock}_${t}_BUY`)) bS = 0;
+                        if (pruneSet.has(`${stock}_${t}_SELL`)) sS = 0;
+
+                        // Threshold (1e-10) handles numeric noise
+                        if (sS > 1e-10) daySells.push({ stock, shares: sS, pr });
+                        if (bS > 1e-10) dayBuys.push({ stock, shares: bS, pr });
+                    });
+
+                    // Execute Sells first to recycle liquidity
+                    daySells.forEach(tr => {
+                        const fee = marginalSlip(tr.shares);
+                        simHoldings[tr.stock] -= tr.shares;
+                        simCash += (tr.shares * (tr.pr - fee));
+                        log.sells[tr.stock] = tr.shares;
+                    });
+                    // Execute Buys second
+                    dayBuys.forEach(tr => {
+                        const fee = marginalSlip(tr.shares);
+                        simHoldings[tr.stock] += tr.shares;
+                        simCash -= (tr.shares * (tr.pr + fee));
+                        log.buys[tr.stock] = tr.shares;
+                    });
+
+                    // Record Settlement State
+                    let stockWealth = 0;
+                    stocks.forEach(stock => {
+                        const pr = parseFloat(prices[t][stock]) || 0;
+                        log.stockValues[stock] = simHoldings[stock] * pr;
+                        stockWealth += log.stockValues[stock];
+                        path.inventory[stock][t] = simHoldings[stock];
+                    });
+
+                    log.cashHeld = simCash;
+                    log.totalValue = log.cashHeld + stockWealth;
+                    path.cash[t] = simCash;
+                    logs.push(log);
+                }
+                return { nav: logs[T - 1].totalValue, logs, path };
+            };
+
+            // PASS 1: Generate the Baseline (Unfiltered restimulation)
+            const baseline = executeSimulation(new Set());
+            if (!applyPruning) return { nav: baseline.nav, logs: baseline.logs };
+
+            // PASS 2: Sequential Pruning Evaluation
+            let candidates = [];
             for (let t = 0; t < T; t++) {
-                // --- APPLY INTEREST ON STARTING CASH ---
-                // The amount of cash we have at the beginning of the day, after applying interest
-                if (t > 0) simCash *= gamma;
-                let log = { dayIdx: t, buys: {}, sells: {}, stockValues: {}, cashHeld: 0, totalValue: 0 };
-                let dailyTrades = []; // Trades made on this day
-
                 stocks.forEach(stock => {
                     const sKey = stock.replace(/\s+/g, '_');
-                    const pr = parseFloat(prices[t][stock]) || 0; // Price of this stock today
-
-                    let bS = 0; let sS = 0;
-                    // Sum the solution values of this stock for each tier
-                    for (let n = 0; n < NUM_TIERS; n++) {
-                        bS += cols[`b_${sKey}_${t}_t${n}`]?.Primal || 0;
-                        sS += cols[`s_${sKey}_${t}_t${n}`]?.Primal || 0;
-                    }
-
-                    // --- REMOVE TRIVIAL TRADES ---
-                    // If the total value of trades for this stock is below the threshold,
-                    // disregard these trades
-                    if (prune && (bS + sS) * pr < CASH_THRESHOLD) { bS = 0; sS = 0; }
-
-                    if (bS > 0.01 || sS > 0.01) {
-                        // If there are trades for this stock, record them for this day
-                        dailyTrades.push({ stock, bS, sS, pr });
-                        if (bS > 0.01) log.buys[stock] = bS;
-                        if (sS > 0.01) log.sells[stock] = sS;
-                    }
-                });
-
-                // --- LIQUIDITY RECYCLING: SELLS FIRST ---
-                // Execute sell trades, apply fees
-                dailyTrades.forEach(tr => {
-                    if (tr.sS > 0) {
-                        const fee = (lambda * (tr.sS + 1)) / 2;
-                        // Reduce the simulated holdings for this stock
-                        simHoldings[tr.stock] -= tr.sS;
-                        // Increase the simulated cash for this stock
-                        simCash += (tr.sS * (tr.pr - fee));
-                    }
-                });
-
-                // --- LIQUIDITY RECYCLING: BUYS SECOND ---
-                // Execute buy trades, apply fees
-                dailyTrades.forEach(tr => {
-                    if (tr.bS > 0) {
-                        const fee = (lambda * (tr.bS + 1)) / 2;
-                        // Increase the simulated holdings for this stock
-                        simHoldings[tr.stock] += tr.bS;
-                        // Decrease the simulated cash for this stock
-                        simCash -= (tr.bS * (tr.pr + fee));
-                    }
-                });
-
-                // --- FINAL EOD SETTLEMENT ---
-                let stockWealth = 0;
-                stocks.forEach(stock => {
                     const pr = parseFloat(prices[t][stock]) || 0;
-                    log.stockValues[stock] = simHoldings[stock] * pr;
-                    stockWealth += log.stockValues[stock];
+                    let bS = 0, sS = 0;
+                    for (let n = 0; n < NUM_TIERS; n++) {
+                        bS += (cols[`b_${sKey}_${t}_t${n}`]?.Primal || 0);
+                        sS += (cols[`s_${sKey}_${t}_t${n}`]?.Primal || 0);
+                    }
+                    if (bS > 1e-15 && (bS * pr) < CASH_THRESHOLD) {
+                        candidates.push({ t, stock, shares: bS, type: 'BUY', value: bS * pr });
+                    }
+                    if (sS > 1e-15 && (sS * pr) < CASH_THRESHOLD) {
+                        candidates.push({ t, stock, shares: sS, type: 'SELL', value: sS * pr });
+                    }
                 });
-
-                log.cashHeld = simCash;
-                log.totalValue = log.cashHeld + stockWealth;
-                logs.push(log);
             }
-            return { nav: logs[T - 1].totalValue, logs };
+
+            // Sort candidates by dollar value to maximize 'trivial' prunes
+            candidates.sort((a, b) => a.value - b.value);
+
+            let accepted = new Set();
+            let deltaCash = new Float64Array(T);
+            let deltaInv = {};
+            stocks.forEach(s => deltaInv[s] = new Float64Array(T));
+
+            candidates.forEach(can => {
+                const pr = parseFloat(prices[can.t][can.stock]) || 0;
+                const fee = marginalSlip(can.shares);
+                let isSafe = true;
+
+                if (can.type === 'BUY') {
+                    // Check: Does removing this BUY cause inventory to go negative later?
+                    for (let ft = can.t; ft < T; ft++) {
+                        if (baseline.path.inventory[can.stock][ft] + deltaInv[can.stock][ft] - can.shares < -1e-10) {
+                            isSafe = false; break;
+                        }
+                    }
+                } else {
+                    // Check: Does removing this SELL cause cash to go negative later?
+                    const netProceeds = can.shares * (pr - fee);
+                    for (let ft = can.t; ft < T; ft++) {
+                        if (baseline.path.cash[ft] + deltaCash[ft] - netProceeds < -1e-5) {
+                            isSafe = false; break;
+                        }
+                    }
+                }
+
+                if (isSafe) {
+                    accepted.add(`${can.stock}_${can.t}_${can.type}`);
+                    // Apply cumulative delta for future checks
+                    for (let ft = can.t; ft < T; ft++) {
+                        if (can.type === 'BUY') deltaInv[can.stock][ft] -= can.shares;
+                        else deltaInv[can.stock][ft] += can.shares;
+                    }
+                    // Compound the cash delta with daily interest
+                    let currentDelta = (can.type === 'BUY') ? (can.shares * (pr + fee)) : -(can.shares * (pr - fee));
+                    for (let ft = can.t; ft < T; ft++) {
+                        deltaCash[ft] += currentDelta;
+                        currentDelta *= gamma;
+                    }
+                }
+            });
+
+            // PASS 3: Generate the Final Actionable Plan
+            const pruned = executeSimulation(accepted);
+            return { nav: pruned.nav, logs: pruned.logs };
         };
 
         // LP Solver Output - Prone to Roundoff Error

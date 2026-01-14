@@ -61,8 +61,10 @@ window.StocksModule = {
             if (e.data.type === 'result' && e.data.status === 'Optimal') {
                 // Set the results to the global state 'stockState.results'
                 window.stockState.results = e.data.result;
-                // Update the user interface with the new data
-                updateResultsUI();
+                // Update the UI
+                if (window.updateResultsUI) {
+                    window.updateResultsUI();
+                }
                 // Update the status to indicate a successful solve
                 updateStatus("Optimal Path Found", "optimal");
             } else {
@@ -165,8 +167,8 @@ window.StocksModule = {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([accumulationHeader, ...accumulationData]), "Cumulative Holdings");
 
         // Write the workbook to a file and download it.
-        const dateTag = new Date().toISOString().slice(0, 10);
-        XLSX.writeFile(wb, `Portfolio_Analysis_${dateTag}.xlsx`);
+
+        XLSX.writeFile(wb, `Portfolio_Analysis.xlsx`);
     },
 
     /**Renders the Price History table--only displayed and not editable due to size.
@@ -183,12 +185,15 @@ window.StocksModule = {
         head.innerHTML = `<tr><th>Month</th><th>Day</th>${window.stockState.stocks.map(s => `<th>${s}</th>`).join('')}</tr>`;
 
         // Populate the table body
-        body.innerHTML = window.stockState.prices.slice(0, 365).map(row => `
+        body.innerHTML = window.stockState.prices.slice(0, 365).map(row => {
+            const monthName = window.monthNames[parseInt(row.Month)] || row.Month;
+            return `
             <tr>
-                <td>${row.Month || ''}</td> // Add the month column
-                <td>${row.Day || ''}</td> // Add the day column
-                ${window.stockState.stocks.map(s => `<td>$${(parseFloat(row[s]) || 0).toFixed(2)}</td>`).join('')} // Add the stock price columns
-            </tr>`).join('');
+                <td>${monthName || ''}</td>
+                <td>${row.Day || ''}</td>
+                ${window.stockState.stocks.map(s => `<td>$${(parseFloat(row[s]) || 0).toFixed(2)}</td>`).join('')}
+            </tr>`
+        }).join('');
     },
 
     /**Handles the rendering of the D3 charts in the stocks module.
@@ -201,10 +206,13 @@ window.StocksModule = {
         // Check if the necessary data is available
         if (!window.stockState.results) return; 
 
+        const activeSubTab = document.querySelector('#stockTabs .tab-btn.active')?.dataset.tab;
         // Render each chart and the shared legend
-        this.drawActivityChart(); // Renders the activity chart
-        this.drawCompositionChart(); // Renders the composition chart
-        this.drawLegend(); // Renders the shared legend
+        if (activeSubTab === 'stockCharts') {
+            this.drawActivityChart(); // Renders the activity chart
+            this.drawCompositionChart(); // Renders the composition chart
+            this.drawLegend(); // Renders the shared legend
+        }
     },
 
     /**
@@ -217,22 +225,10 @@ window.StocksModule = {
      * pointer, and a tooltip appears with details of the activity for that day.
      */
     drawActivityChart() {
-        const container = document.getElementById('portfolioChartContainer');
-        if (!container || !window.stockState.results) return;
+        const chart = window.initChart('portfolioChartContainer');
+        if (!chart) return;
 
-        const rect = container.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return;
-
-        // Calculating and Declaring the chart dimensions
-        container.innerHTML = '';
-        const margin = { top: 20, right: 30, bottom: 40, left: 70 };
-        const width = rect.width - margin.left - margin.right;
-        const height = rect.height - margin.top - margin.bottom;
-
-        // Create the container for the chart
-        const svg = d3.select(container).append("svg")
-            .attr("width", rect.width).attr("height", rect.height)
-            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        const { svg, width, height } = chart;
 
         // Prepare the data
         const data = window.stockState.results.dailyLogs;
@@ -339,8 +335,11 @@ window.StocksModule = {
             
             // Update the x position of the labels
             xLabels.attr("x", d => positions[d.index] + (positions[d.index + 1] - positions[d.index]) / 2)
-                .style("opacity", (d) => (positions[d.index + 1] - positions[d.index] > 3) ? 1 : 0);
-        };
+                .style("opacity", (d) => {
+                    if (hoverIndex === null) return 1;
+                    return (positions[d.index + 1] - positions[d.index] > 2) ? 1 : 0;
+                });
+            };
 
         // Fisheye Overlay
         svg.append("rect").attr("width", width).attr("height", height).attr("fill", "transparent")
@@ -362,23 +361,10 @@ window.StocksModule = {
      * Updated to include month labels and a visible x-axis baseline.
      */
     drawCompositionChart() {
-        // Clear the container element and get its size
-        const container = document.getElementById('allocationChartContainer');
-        if (!container || !window.stockState.results) return;
-        const rect = container.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return;
+        const chart = window.initChart('allocationChartContainer');
+        if (!chart || !window.stockState.results) return;
 
-        // Calculate the chart dimensions
-        container.innerHTML = '';
-        const margin = { top: 20, right: 30, bottom: 40, left: 70 };
-        const width = rect.width - margin.left - margin.right;
-        const height = rect.height - margin.top - margin.bottom;
-
-        // Set up the SVG element
-        if (width <= 0 || height <= 0) return;
-        const svg = d3.select(container).append("svg")
-            .attr("width", rect.width).attr("height", rect.height)
-            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        const { svg, width, height } = chart;
 
         // Get the data for the chart
         const data = window.stockState.results.dailyLogs;
@@ -472,7 +458,10 @@ window.StocksModule = {
             areas.attr("x", (d, i) => positions[i]).attr("width", (d, i) => Math.max(0, positions[i + 1] - positions[i]));
             xLabels.attr("x", d => positions[d.index] + (positions[d.index + 1] - positions[d.index]) / 2)
                 // Show the labels that are in the enlarged area and hide the others
-                .style("opacity", (d) => (positions[d.index + 1] - positions[d.index] > 3) ? 1 : 0);
+                .style("opacity", (d) => {
+                    if (hoverIndex === null) return 1;
+                    return (positions[d.index + 1] - positions[d.index] > 2) ? 1 : 0;
+                });
         };
 
         svg.append("rect").attr("width", width).attr("height", height).attr("fill", "transparent")

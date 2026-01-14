@@ -214,12 +214,13 @@ async function solveSchedulingMILP(params) {
             /**============================================================================
              * CONTIGUITY OBJECTIVE FUNCTION (The Gap Penalty)
              * ============================================================================
-             * Goal: Penalize gaps in schedule; Penalty = Cost * (Span - Hours_Worked).
-             * Logic: A perfect shift has Span == Hours Worked, where Span = (End - Start)
-             * If Span > Sum(y), the Objective Value is penalized more than paying for work
-             * This forces the solver to group 'y' variables tightly between Start/End, 
-             * without needing to add excessive binaries or constraints.  The objective
-             * function will innately prioritize clusters.
+             * Goal: Enforce the rule that all hours worked by an employee in a day must 
+             * equal the difference between the first and last hour they work in that day.
+             * * Mathematical Logic: Penalty = Cost * (End - Start - Sum of Hours Worked)
+             * By minimizing this difference, the solver is forced to eliminate "gaps" 
+             * within a shift. If (End - Start) > Sum(y), the objective value is 
+             * penalized, incentivizing the solver to cluster all 'y' (working hours) 
+             * into a single contiguous block between the start and end variables.
              */
             const GAP_PENALTY = base * 2.0; // Double the wage cost for each gap hour
 

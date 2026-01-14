@@ -111,7 +111,11 @@ window.ScheduleModule = {
             // If optimal, update the global state and update the UI
             if (type === 'result' && status === 'Optimal') {
                 window.schedState.results = result;
-                if (window.updateResultsUI) window.updateResultsUI();
+
+                if (window.updateResultsUI) {
+                    window.updateResultsUI();
+                }
+
                 updateStatus("Optimal Roster Found", "optimal");
             } else {
                 // If not 'Optimal', update the status message and scheduling panel error message
@@ -180,7 +184,7 @@ window.ScheduleModule = {
         // Binary decision variables
         const binaryVars = (E * T) + (E * D) + E; // Total number of binary decision variables
         // Continuous decision variables = Assignments + Shift Bounds + Demand Slack
-        const continuousVars = (E * T * S)  + (E * D * 2) + (E * 3) + (T * S); // Total number of continuous decision variables
+        const continuousVars = (E * T * S) + (E * D * 2) + (E * 3) + (T * S); // Total number of continuous decision variables
         // Total constraints = Demand Satisfaction + Skill Linking and Bounds + Daily Shift Logic + Balancing Capacity and Global Links
         const totalConstraints = (T * S) + ((E * T) + (E * T * S)) + ((E * D * 4) + (E * T * 2)) + ((E * 4) + 1 + (E * D)); // Total number of constraints
 
@@ -290,11 +294,11 @@ window.ScheduleModule = {
      * The file is saved with a timestamp in the filename to support multiple exports.
      * The exported file has two sheets:
      * 1. Schedule by Day: shows the schedule by hour and day, with each row representing an hour.
-     *    The first column is the day, the second column is the hour, and the remaining columns are the employees.
-     *    Each cell in a column represents whether an employee is scheduled for that hour (X) or not (-).
+     * The first column is the day, the second column is the hour, and the remaining columns are the employees.
+     * Each cell in a column represents whether an employee is scheduled for that hour (X) or not (-).
      * 2. Schedule by Employee: shows the schedule by hour for each employee, with each row representing an hour.
-     *    The first column is the employee ID, and the remaining columns are the hours.
-     *    Each cell in a row represents whether an employee is scheduled for that hour (X) or not (-).
+     * The first column is the employee ID, and the remaining columns are the hours.
+     * Each cell in a row represents whether an employee is scheduled for that hour (X) or not (-).
      */
     exportResults() {
         // No optimized results found, alert the user and return
@@ -327,8 +331,7 @@ window.ScheduleModule = {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([empHeader, ...empRows]), "Schedule by Employee");
 
         // Write the workbook for Download
-        const dateTag = new Date().toISOString().slice(0, 10);
-        XLSX.writeFile(wb, `Workforce_Optimization_${dateTag}.xlsx`);
+        XLSX.writeFile(wb, `Workforce_Optimization.xlsx`);
     },
 
     /**Renders the employee list in the left sidebar. This function is responsible for generating
@@ -489,17 +492,18 @@ window.ScheduleModule = {
         recContainer.innerHTML = html; // Render the HTML in the container
     },
 
-    /**Renders an individual weekly Gantt chart with an enlarged dynamic legend.
+    /**Renders an individual weekly Gantt chart with an enlarged dynamic legend using the global initChart utility.
      * The Gantt chart shows the employee's weekly availability and role assignments in 
      * 1-hour increments for each day of the week.
      * @param {Object} emp - The employee object containing availability and role assignment data.
      */
     renderIndividualGantt(emp) {
-        const container = document.getElementById('individualGantt'); // Get the container and header element
+        // Use the utility to handle SVG setup and standard margins.
+        const chart = window.initChart('individualGantt', { top: 20, left: 60 });
         const header = document.querySelector('#individualScheduleContainer h3');
-        if (!container || !header) return;
-        container.innerHTML = '';
+        if (!chart || !header) return;
 
+        const { svg, width } = chart;
         const color = d3.scaleOrdinal().domain(this.skillNames).range(d3.schemeCategory10); // Create a color scale
 
         // Enlarged Legend Generation (including Availability)
@@ -513,15 +517,9 @@ window.ScheduleModule = {
         // Set the header content
         header.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:center; width:100%;"><span>Weekly Schedule Detail</span> ${legendHtml}</div>`;
 
-        const rect = container.getBoundingClientRect(); // Get the container dimensions
-        const margin = { top: 20, right: 30, bottom: 30, left: 60 };
-        const width = Math.max(0, rect.width - margin.left - margin.right);
         const height = 7 * 40;
-        if (width <= 0) return; // If there's not enough space, return early
-
-        const svg = d3.select(container).append("svg")
-            .attr("width", rect.width).attr("height", height + margin.top + margin.bottom) // Create the SVG element
-            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        // Update SVG height to accommodate the 7-day height
+        d3.select('#individualGantt svg').attr("height", height + 50);
 
         const x = d3.scaleLinear().domain([0, 24]).range([0, width]); // Create the x-axis scale
         const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; // Day names
@@ -618,7 +616,7 @@ window.ScheduleModule = {
         this.render7DayStats(); // This can now find the elements above
     },
 
-    /**This function renders a Gantt chart showing the schedule for a single day.
+    /**This function renders a Gantt chart showing the schedule for a single day 
      * The Gantt chart shows the schedule for each employee, and allows users to hover over 
      * a cell to see the labor supply and demand metrics for that hour.
      * @param {Array<Object>} data - The data to display, which is an array of employee objects
@@ -628,27 +626,22 @@ window.ScheduleModule = {
      * @param {d3.ScaleOrdinal} colorScale - The color scale to use for the cells.
      */
     renderGantt(data, dayIdx, minH, maxH, colorScale) {
-        const container = document.getElementById('rosterGanttContainer');
-        if (!container) return;
+        // Standardize setup while allowing the utility to clear the container.
+        const chart = window.initChart('rosterGanttContainer', { left: 80, bottom: 10}, false);
+        if (!chart) return;
 
-        const rect = container.getBoundingClientRect();
-        const margin = { top: 20, right: 20, bottom: 20, left: 80 };
-        const width = Math.max(0, rect.width - margin.left - margin.right); // Ensure width is non-negative
-
+        const { svg, width } = chart;
         const hoursCount = (maxH - minH) + 1;
         const xScale = d3.scaleLinear().domain([0, hoursCount]).range([0, width]);
         const cellHeight = 22;
         const height = data.length * cellHeight;
 
-        if (width <= 0) return; // Exit early if container is not ready
-
-        const svg = d3.select(container).append("svg")
-            .attr("width", rect.width).attr("height", height + margin.top + margin.bottom)
-            .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        // Update SVG height to accommodate the full roster
+        d3.select('#rosterGanttContainer svg').attr("height", height + 50);
 
         data.forEach((emp, eIdx) => {
             const y = eIdx * cellHeight;
-            svg.append("text").attr("x", -10).attr("y", y + 15).attr("text-anchor", "end").style("font-size", "11px").text(emp.id);
+            svg.append("text").attr("x", -10).attr("y", y + 25).attr("text-anchor", "end").style("font-size", "11px").text(emp.id);
 
             for (let h = 0; h < hoursCount; h++) {
                 const role = emp.schedule[dayIdx * 24 + minH + h];
@@ -663,7 +656,7 @@ window.ScheduleModule = {
                     ).length;
 
                     svg.append("rect")
-                        .attr("x", xScale(h)).attr("y", y + 2)
+                        .attr("x", xScale(h)-5).attr("y", y + 12)
                         .attr("width", Math.max(0, (width / hoursCount) - 0.5)) // Robust width calculation
                         .attr("height", cellHeight - 4).attr("fill", colorScale(role)).attr("rx", 2)
                         .on("mouseover", (e) => {
@@ -685,7 +678,7 @@ window.ScheduleModule = {
         // For each hour, add a label to the chart
         for (let h = 0; h <= hoursCount; h += 2) {
             // Add a label to the x-axis for every even hour
-            svg.append("text").attr("x", xScale(h)).attr("y", -5).style("font-size", "9px").attr("fill", "#999").attr("text-anchor", "middle").text(`${minH + h}:00`);
+            svg.append("text").attr("x", xScale(h)).attr("y", 5).style("font-size", "9px").attr("fill", "#999").attr("text-anchor", "middle").text(`${minH + h}:00`);
         }
     },
 
@@ -827,31 +820,22 @@ window.ScheduleModule = {
         });
     },
 
-    /**Render a stacked bar chart.
+    /**Render a stacked bar chart using the global initChart utility.
      * This function is responsible for generating the visual representation of the given data,
      * which is implemented using a set of bar elements, each representing a skill and filled
      * with a color based on the skill name. The chart is synchronized with the legend.
-     * The function first gets the container element selected by the provided containerId. It then
-     * calculates the dimensions of the chart and creates the SVG element with the appropriate size
-     * and coordinates. It then creates a color scale for the different skills, using the schemeCategory10
-     * colormap.  It then calculates the weights of each skill by summing the values for each skill in the
-     * data. It then calculates the total weight and the positions of the bars. The function creates a
-     * stacked series using the data and the skill names, which is used to calculate the height and width
-     * of each bar. Finally, it adds the series to the SVG element and renders the chart.
      * @param {string} containerId - The id of the HTML element that will contain the chart.
      * @param {Array} data - The list of objects containing the skill values.
      * @param {string} type - The type of chart to render.
      * @return {void} This function does not return anything.
      */
     renderStackedChart(containerId, data, type) {
-        const container = d3.select(containerId); // Select the container element using the provided containerId
-        container.selectAll("*").remove(); // Clear the container and select all elements within it
-        // Get the dimensions of the container
-        const rect = container.node().getBoundingClientRect(), margin = { top: 10, right: 30, bottom: 40, left: 50 };
-        const width = Math.max(0, rect.width - margin.left - margin.right), height = Math.max(0, rect.height - margin.top - margin.bottom);
-        if (width <= 0) return;
-        // Create the SVG element with the appropriate size and coordinates
-        const svg = container.append("svg").attr("width", rect.width).attr("height", rect.height).append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+        // Use the utility to ensure consistency with other modules.
+        const selector = containerId.startsWith('#') ? containerId.slice(1) : containerId;
+        const chart = window.initChart(selector, { bottom: 40 });
+        if (!chart) return;
+
+        const { svg, width, height } = chart;
 
         // Create a color scale for the different skills
         const color = d3.scaleOrdinal().domain(this.skillNames).range(d3.schemeCategory10);

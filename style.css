@@ -19,6 +19,10 @@
     --spacing-sm: 0.5rem;
     --spacing-md: 1rem;
     --spacing-lg: 1.25rem;
+    --chart-bg: #ffffff;
+    --chart-border-radius: 0.5rem;
+    --tooltip-bg: rbga(0, 0, 0, 0.9);
+    --transition-speed: 0.2s ease;
 }
 
 * {
@@ -28,20 +32,12 @@
 body,
 html {
     margin: 0;
-    font-family: 'Segoe UI', sans-serif;
-    background-color: var(--light-bg);
-    color: var(--text-color);
-    height: 100vh;
-    width: 100vw;
-    overflow: hidden;
-}
-
-body {
-    margin: 0;
+    padding: 0;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background-color: var(--light-bg);
     color: var(--text-color);
     height: 100vh;
+    width: 100vw;
     overflow: hidden;
     font-size: 1rem;
 }
@@ -239,9 +235,6 @@ body {
    ========================================================================== */
 
 .table-container {
-    background: white;
-    border: 1px solid var(--border-color);
-    border-radius: 0.25rem;
     overflow: auto;
     width: 100%;
     flex: 1;
@@ -437,10 +430,14 @@ td input {
    D3 VISUALIZATION CORE STYLES
    ========================================================================== */
 
-.chart-wrapper {
-    background: white;
+.chart-wrapper, .table-container, .detail-card {
+    background: var(--chart-bg);
     border: 1px solid var(--border-color);
-    border-radius: 0.25rem;
+    border-radius: var(--chart-border-radius);
+    transition: box-shadow var(--transition-speed);
+}
+
+.chart-wrapper {
     padding: var(--spacing-md);
     margin-bottom: var(--spacing-lg);
     display: flex;
@@ -544,11 +541,8 @@ svg text {
 }
 
 .detail-card {
-    background: white;
     padding: 10px;
     color: var(--primary);
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
 }
 
 .full-width {
@@ -722,4 +716,45 @@ svg text {
 .opportunity-card.critical {
     background: #fdedec;
     border-left-color: var(--danger);
+}
+
+/* ==========================================================================
+   TAB EXCLUSIVE: ORDERING MODULE
+   ========================================================================== */
+
+/* Layout for the Demand Probabilities Tab */
+.analysis-split {
+    display: grid;
+    grid-template-columns: 350px 1fr;
+    gap: 20px;
+    align-items: start;
+}
+
+/* Optimal Policy Visualization */
+.policy-grid {
+    display: flex;
+    gap: 20px;
+}
+
+.policy-card.optimal {
+    flex: 2;
+    background: #2c3e50;
+    color: white;
+    padding: 25px;
+    border-radius: 8px;
+}
+
+.ev-display {
+    font-size: 2.5rem;
+    font-weight: bold;
+    color: #27ae60;
+}
+
+.alt-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px;
+    background: #ecf0f1;
+    margin-bottom: 5px;
+    border-radius: 4px;
 }

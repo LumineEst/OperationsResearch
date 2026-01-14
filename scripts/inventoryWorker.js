@@ -127,11 +127,16 @@ async function solveSteelProductionLP(params) {
             if (p.changeOverCost > 0) objTerms.push(`-${fmt(p.changeOverCost)} b_${i}_${j}`); // Changeover Cost: Binary fixed cost
             objTerms.push(`-${fmt(SLACK_PENALTY)} s_${i}_${j}`); // Slack Penalty: Penalty to mitigate mathematical infeasibility
 
-            /**PRODUCTION BALANCE/FLOW CONSTRAINT
-            * Ensures that: Produced + Slack + (Prev Inv) + (Current Backorder) = (Current Demand) + (Current Inv) + (Prev Backorder)
-            * Which creates continuity between days, unifying daily constraints across the week.
-            * Formula: p + s - i + bo + i(prev) - bo(prev) = demand
-            */
+            /** PRODUCTION BALANCE/FLOW CONSTRAINT
+             * Ensures continuity over time. 
+             * Mathematical Logic: (Current Stocks) = (Prior Stocks) + (New Production) - (Demand Met)
+             *
+             * Formulated as: p + s - i + bo + i(prev) - bo(prev) = demand
+             * - p_{i}_{j}: Units produced.
+             * - s_{i}_{j}: Slack variable (Penalty) used if demand is physically impossible to meet.
+             * - i_{i}_{j}: Inventory carried forward to the next day.
+             * - bo_{i}_{j}: Backorder volume to be fulfilled on a future day.
+             */
             let bal = `p_${i}_${j} + s_${i}_${j} - i_${i}_${j} + bo_${i}_${j}`;
             if (j > 0) bal += ` + i_${i}_${j - 1} - bo_${i}_${j - 1}`;  // Handles First Day lack of priors
             constraints.push(` c_bal_${i}_${j}: ${bal} = ${fmt(dem)}`);
