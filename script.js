@@ -28,6 +28,11 @@ const moduleRegistry = {
         label: "Labor Cost",
         getResult: () => window.schedState.results?.actualLaborCost || window.schedState.results?.objective,
         draw: () => window.ScheduleModule.drawCharts()
+    },
+    ordering: {
+        label: "Weekly Profit",
+        getResult: () => window.orderState.results?.optimalPolicy.totalProfit,
+        draw: () => window.OrdersModule.drawCharts()
     }
 };
 
@@ -43,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.InventoryModule) window.InventoryModule.init();
     if (window.StocksModule) window.StocksModule.init();
     if (window.ScheduleModule) window.ScheduleModule.init();
+    if (window.OrdersModule) window.OrdersModule.init();
 
     setupGlobalNavigation();
     setupTooltip();
@@ -322,6 +328,17 @@ function setupGlobalNavigation() {
  * @returns {Promise<void>} A promise that resolves when the data is loaded and processed.
  */
 async function loadModuleData(moduleType) {
+    if (moduleType === 'ordering') {
+        if(window.OrdersModule) {
+            if (!window.orderState.results) {
+                window.OrdersModule.requestSolve();
+            } else {
+                window.OrdersModule.updateUI();
+            }
+        }
+        return;
+    }
+    
     // Map of module types to file paths.
     const fileMap = { 'inventory': 'data/Inventory.xlsx', 'stocks': 'data/Stocks.xlsx', 'scheduling': 'data/Scheduling.xlsx' };
     const filePath = fileMap[moduleType]; // Get the file path for the requested module type.

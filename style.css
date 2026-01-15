@@ -430,7 +430,9 @@ td input {
    D3 VISUALIZATION CORE STYLES
    ========================================================================== */
 
-.chart-wrapper, .table-container, .detail-card {
+.chart-wrapper,
+.table-container,
+.detail-card {
     background: var(--chart-bg);
     border: 1px solid var(--border-color);
     border-radius: var(--chart-border-radius);
@@ -722,18 +724,16 @@ svg text {
    TAB EXCLUSIVE: ORDERING MODULE
    ========================================================================== */
 
-/* Layout for the Demand Probabilities Tab */
 .analysis-split {
     display: grid;
     grid-template-columns: 350px 1fr;
-    gap: 20px;
+    gap: 10px;
     align-items: start;
 }
 
-/* Optimal Policy Visualization */
 .policy-grid {
     display: flex;
-    gap: 20px;
+    gap: 10px;
 }
 
 .policy-card.optimal {
@@ -757,4 +757,91 @@ svg text {
     background: #ecf0f1;
     margin-bottom: 5px;
     border-radius: 4px;
+}
+
+.panel-column-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    height: 100%;
+    margin-bottom: 0 !important
+}
+
+.chart-row, .analysis-row {
+    display: flex;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+}
+.chart-row {
+    margin-bottom: 10px;
+}
+
+.analysis-row {
+    margin-bottom: 0;
+}
+
+.scorecard-wrapper {
+    min-height: auto;
+    height: auto;
+    flex: 0 0 auto;
+    background: #2c3e50;
+    color: white;
+    padding: 10px 20px;
+    margin-bottom: 10px !important;
+}
+
+.scorecard-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.kpi-main-val {
+    font-size: 1.8rem;
+    font-weight: bold;
+    color: #2ecc71;
+}
+
+.kpi-sub-text {
+    font-size: 0.9rem;
+    font-style: italic;
+    opacity: 0.9;
+}
+
+.scorecard-grid {
+    text-align: right;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px 30px;
+    font-size: 0.9rem;
+}
+
+.metric-label {
+    font-weight: bold;
+}
+
+.metric-cost {
+    font-weight: bold;
+    color: #e74c3c;
+}
+
+.axis-label {
+    font-weight: bold;
+    font-size: 0.9rem;
+    fill: #333;
+}
+
+.legend-title {
+    font-size: 1.1rem;
+    font-weight: bold;
+    fill: #333;
+}
+
+.legend-label {
+    font-size: 0.9rem;
+}
+
+.legend-box {
+    cursor: pointer;
 }

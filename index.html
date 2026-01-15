@@ -162,7 +162,8 @@
                             <div id="employee-list-container" style="display:none; margin-top: 20px;">
                                 <label><strong>Search Employee</strong></label>
                                 <div class="input-group" style="margin-top: 5px; margin-bottom: 10px;">
-                                    <input type="text" id="employeeSearch" placeholder="Type ID to Filter" style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px;">
+                                    <input type="text" id="employeeSearch" placeholder="Type ID to Filter"
+                                        style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px;">
                                 </div>
                                 <label><strong>Select Employee</strong></label>
                                 <div id="employeeList" class="scrollable-list"></div>
@@ -213,17 +214,92 @@
                 <section id="ordering-panel" class="top-level-panel">
                     <aside class="sidebar left-sidebar">
                         <div class="sidebar-header">
-                            <h2>Reordering Params</h2>
+                            <h2>Policy Params</h2>
                         </div>
                         <div class="sidebar-content">
-                            <p>Parameters for reorder logic will appear here.</p>
+                            <div class="input-group">
+                                <label><strong>Selling Price</strong> ($)</label>
+                                <input type="number" id="ord_price">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Unit Cost</strong> ($)</label>
+                                <input type="number" id="ord_cost">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Fixed Order Cost</strong> ($)</label>
+                                <input type="number" id="ord_fixed">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Holding Cost</strong> ($/wk)</label>
+                                <input type="number" id="ord_holding">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Penalty Cost</strong> ($)</label>
+                                <input type="number" id="ord_penalty">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Special Order Cost</strong> ($)</label>
+                                <input type="number" id="ord_special">
+                            </div>
+                            <div class="input-group">
+                                <label><strong>Max Capacity</strong> (Trucks)</label>
+                                <input type="number" id="ord_capacity">
+                            </div>
                         </div>
                     </aside>
                     <main class="content-area">
-                        <div class="placeholder-content">
-                            <h3>Ordering Optimizer</h3>
-                            <p>This module isn't built yet.</p>
-                        </div>
+                        <div class="vis-panel active panel-column-layout">
+                            <div class="chart-wrapper scorecard-wrapper">
+                                <div class="scorecard-content">
+                                    <div>
+                                        <div style="font-size: 0.8rem; opacity: 0.8;">Total Profit (Weekly)</div>
+                                        <div id="sc_profit" class="kpi-main-val">---</div>
+                                        <div id="sc_config" class="kpi-sub-text">---</div>
+                                        </div>
+                                    <div class="scorecard-grid">
+                                        <div>Revenue: <span id="sc_rev" class="metric-label">---</span></div>
+                                        <div>Holding Costs: <span id="sc_hold" class="metric-cost">---</span></div>
+                                        <div>Order Expenses: <span id="sc_ord" class="metric-cost">---</span></div>
+                                        <div>Shortage Costs: <span id="sc_short" class="metric-cost">---</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            <div class="chart-row">
+                                <div class="chart-wrapper">
+                                    <h3>Inventory Policies (Profit by Order Size)</h3>
+                                    <div id="scatterContainer" class="d3-container"></div>
+                                    </div>
+                                <div class="chart-wrapper">
+                                    <h3>Sensitivity Heatmap (Reorder Point to Order Size)</h3>
+                                    <div id="heatMapContainer" class="d3-container"></div>
+                                    </div>
+                                </div>
+                            <div class="analysis-row">
+                                <div class="chart-wrapper">
+                                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                                        <h3>Weekly Demand Levels</h3>
+                                        <h4>The Sum of Probabilities must Equal 1.</h4>
+                                        <button class="btn btn-secondary" onclick="window.OrdersModule.addDemandRow()">+ Row</button>
+                                        </div>
+                                    <div class="table-container">
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>Quantity</th>
+                                                    <th>Probability (0-1)</th>
+                                                    <th>*Remove*</th>
+                                                    </tr>
+                                                </thead>
+                                            <tbody id="demandDistBody"></tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                <div class="chart-wrapper">
+                                    <h3>Steady State Inventory</h3>
+                                    <div id="steadyStateChart" class="d3-container"></div>
+                                    </div>
+                                </div>
+                            </div>
                     </main>
                 </section>
             </div>
@@ -235,7 +311,8 @@
                 <div class="sidebar-content">
                     <div class="action-group" style="display:flex; flex-direction:column; gap:10px;">
                         <input type="file" id="universalExcelInput" class="hidden-file-input" accept=".xlsx, .xls">
-                        <button class="btn btn-primary" onclick="document.getElementById('universalExcelInput').click()">Import Data</button>
+                        <button class="btn btn-primary"
+                            onclick="document.getElementById('universalExcelInput').click()">Import Data</button>
                         <button class="btn btn-secondary" id="exportBtn">Export Results</button>
                     </div>
                     <hr style="border:0; border-top:1px solid #444; margin:20px 0;">
@@ -252,10 +329,11 @@
         </div>
     </div>
 
+    <script src="script.js"></script>
     <script src="scripts/inventory.js"></script>
     <script src="scripts/stocks.js"></script>
     <script src="scripts/schedule.js"></script>
-    <script src="script.js"></script>
+    <script src="scripts/orders.js"></script>
 </body>
 
 </html>
