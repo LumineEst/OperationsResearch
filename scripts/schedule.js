@@ -92,7 +92,7 @@ window.ScheduleModule = {
             // Copy the list of demands to the parameters
             demands: JSON.parse(JSON.stringify(window.schedState.demands)),
             // Get the number of employees to prefer from the UI
-            preferedEmployees: document.getElementById('employee-count')?.value || 10
+            preferredEmployees: document.getElementById('employeeCount')?.value || 100
         };
 
         // Create a new Worker Instance
