@@ -155,8 +155,8 @@ async function solvePortfolio(params) {
             let maxVol = 10000;
             if (t < T - 1) {
                 const pNext = parseFloat(prices[t + 1][stock]) || 0;
-                // Price change must exceed overnight carry + confidence hurdle
-                const unitProfit = pNext - (pr * gamma) - omega;
+                // Price change must exceed overnight carry + lower tail of the confidence hurdle
+                const unitProfit = pNext - (pr * gamma) - (omega/2);
                 maxVol = unitProfit > 0 ? (unitProfit / lambda) : 500;
             }
             const tierSize = Math.max(1, Math.ceil(maxVol / NUM_TIERS));

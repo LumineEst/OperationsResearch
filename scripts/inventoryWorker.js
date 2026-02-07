@@ -82,7 +82,7 @@ async function solveSteelProductionLP(params) {
         await highsModulePromise;
     }
 
-    // Opertional Parameters
+    // Operational Parameters
     const { products, rawSteelCost, invCost, maxCapacity, backorderPenalty, operationalTime } = params;
     const daysCount = 7;
     const productCount = products.length;
@@ -110,7 +110,7 @@ async function solveSteelProductionLP(params) {
 
         for (let j = 0; j < daysCount; j++) {
 
-            // For each day of the week, parse the anticipate Demand in tons
+            // For each day of the week, parse the anticipated Demand in tons
             const dem = parseFloat(p.demand[j]) || 0;
 
             /**OBJECTIVE FUNCTION CONSTRUCTION
@@ -199,7 +199,7 @@ async function solveSteelProductionLP(params) {
      * If the slack variable 's' is in the return, it indicates that (demand exceeds capacity).
      */
     try {
-        const result = highsModule.solve(lpString, { time_limit: 10, presolve: 'on' });
+        const result = highsModule.solve(lpString, { time_limit: 1000, presolve: 'on' });
         const status = result?.Status || "Unknown";
         const cols = result.Columns || {};
 
