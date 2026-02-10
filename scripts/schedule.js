@@ -81,7 +81,7 @@ window.ScheduleModule = {
         if (window.resetGlobalKPI) window.resetGlobalKPI();
 
         // Restart the global solver countdown, and render the solver dashboard
-        window.schedState.solverTimeLeft = 300;
+        window.schedState.solverTimeLeft = 420;
         this.startGlobalTicker();
         this.renderSolverDashboard();
 

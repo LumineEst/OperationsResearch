@@ -9,6 +9,11 @@
  * of a shift dynamically using continuous variables bound by binary activation.
  * To ensure feasibility without memory overflow, it similarly ties continuous
  * skill assignments to binary shifts, minimizing branch-and-bound explosions.
+ * Due to the use of minimal staffing slack variables, the solver may return
+ * a solution that is understaffed.  A smoothing Heuristic is used to fill in and
+ * reallocate skill assignments to balance overstaffing of skill-groups.  This
+ * is then repassed through the solver a second time with feasibility weights
+ * helping to get a solution that is more optimal than the original pass.
  * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
  * HiGHs Controls: https://dev.ampl.com/solvers/highs/options.html
  * * @author Joel Wood
@@ -55,57 +60,225 @@ function fmt(num) {
  * scheduling--ensuring surplus labor is spread as even as possible.
  * This is computationally light and exactness is not critical for smoothness
  * So it is best handled post-solve, rather than increasing the complexity of
- * the financially motivated LP Solver.
+ * the financially motivated LP Solver.  Additionally, since the MILP solver uses
+ * slack variables which may allow it to return an understaffed schedule, this
+ * function also does a smoothed fill in of these requirement misses.
+ * This output is then passed back into the MILP solver with weights to do an
+ * additional solve to minimize the price of this feasible solution.
  */
-function smoothSkillAllocation(roster, demands, skillNames) {
+function smoothSkillAllocation(roster, demands, skillNames, allEmployeeData) {
+    const fixes = [];  // List of skill-fixes to be applied at the end
+    // Build Employee Map (Original MaxHrs, Skills, etc)
+    const empMap = new Map(allEmployeeData.map(e => [e.id, e]));
+    // Build Demand Map
     const demandMap = {};
     demands.forEach(d => {
         const t = d.day * 24 + d.hour;
-        demandMap[t] = {};
+        if (!demandMap[t]) demandMap[t] = {};
         skillNames.forEach(s => demandMap[t][s] = parseFloat(d[s]) || 0);
     });
 
-    return roster.map(emp => {
-        const newSchedule = [...emp.schedule];
+    // Helper Function to Count current supply for a skill at time t
+    const getSupply = (t, skill) => roster.filter(e => e.schedule[t] === skill).length;
+
+    // ========================================================================
+    // ROLE OPTIMIZATION
+    // ========================================================================
+    // Swaps assigned skills if the current role is overstaffed but another is needed.
+    roster.forEach(emp => {
         const mySkills = (emp.skills || []).map(s => s.trim());
-
         for (let t = 0; t < 168; t++) {
-            if (!newSchedule[t]) continue; // Not working
-
-            const currentRole = newSchedule[t];
+            if (!emp.schedule[t]) continue;
+            const currentRole = emp.schedule[t];
             const d = demandMap[t] || {};
 
-            // If current role has 0 demand, switch to High Demand skills.
-            if ((d[currentRole] || 0) < 1) {
+            // If current role has surplus (or 0 demand), and another skill has need
+            if ((d[currentRole] || 0) < getSupply(t, currentRole)) {
                 let bestSkill = currentRole;
-                let maxD = 0;
+                let maxUnmet = 0;
+
+                // Look at all other skills this employee has and find the one that needs more
                 mySkills.forEach(s => {
-                    if ((d[s] || 0) > maxD) {
-                        maxD = d[s];
+                    const req = d[s] || 0;
+                    const sup = getSupply(t, s);
+
+                    // If the skill is understaffed, prioritize the skill with the most shortage
+                    if (req > sup && (req - sup) > maxUnmet) {
+                        maxUnmet = req - sup;
                         bestSkill = s;
                     }
                 });
-                newSchedule[t] = bestSkill;
+
+                if (bestSkill !== currentRole) {
+                    emp.schedule[t] = bestSkill;
+                }
             }
         }
-        return { ...emp, schedule: newSchedule };
     });
+
+    // ========================================================================
+    // EMPLOYEE MINIMUM HOURS FILL-IN
+    // ========================================================================
+    roster.forEach(emp => {
+        const conf = empMap.get(emp.id);
+        const minHrs = parseFloat(conf.minHrs) || 0;
+        const maxHrs = parseFloat(conf.maxHrs) || 40;
+        const ABSOLUTE_CAP = maxHrs + 20; // Max possible scheduled hours
+
+        // Hou many hours they have already allocated
+        let currentHrs = emp.schedule.filter(s => s).length;
+
+        while (currentHrs < minHrs) {
+            if (currentHrs >= ABSOLUTE_CAP) break; // Break if fully allocated
+
+            // Find all candidate hours (Available but not working)
+            let candidates = [];
+            for (let d = 0; d < 7; d++) {
+                // Look at hours the employee is available
+                (conf.availability[d] || []).forEach(h => {
+                    const t = d * 24 + h;
+                    if (!emp.schedule[t]) {
+                        // If they aren't working, Score for Smoothness
+                        let score = 0;  // Score for smoothness of added hours being shift-contiguous
+                        if (emp.schedule[t - 1]) score += 100; // Extend forward
+                        if (emp.schedule[t + 1]) score += 100; // Extend backward
+                        if (emp.schedule[t - 1] && emp.schedule[t + 1]) score += 200; // Fill gap
+
+                        // Demand Utility - check if this skill is needed
+                        const mySkills = conf.skills || [];
+                        let bestSkill = mySkills[0];
+                        let maxNeed = -Infinity;
+
+                        // Look at all other skills this employee has and find the one that needs more
+                        mySkills.forEach(s => {
+                            const req = (demandMap[t] && demandMap[t][s]) || 0;
+                            const sup = getSupply(t, s);
+                            if ((req - sup) > maxNeed) {
+                                maxNeed = req - sup;
+                                bestSkill = s;
+                            }
+                        });
+
+                        // If the skill is understaffed, prioritize the skill with the most shortage
+                        if (maxNeed > 0) score += 50;
+                        candidates.push({ t, score, skill: bestSkill, day: d, hour: h });
+                    }
+                });
+            }
+
+            if (candidates.length === 0) break; // No availability left
+
+            // Pick the "Smoothest" slot
+            candidates.sort((a, b) => b.score - a.score);
+            const best = candidates[0];
+
+            // Assign the best slot
+            emp.schedule[best.t] = best.skill;
+            currentHrs++;
+
+            // Log the actions, to be displayed in the console
+            fixes.push({
+                Type: "Min Hours Fix",
+                Employee: emp.id,
+                Time: `Day ${best.day} @ ${best.hour}:00`,
+                Action: `Added Shift (${best.skill})`
+            });
+        }
+    });
+
+    // ========================================================================
+    // PASS 3: UNMET DEMAND REPAIR (The "Under-Staffed" Fix)
+    // ========================================================================
+    for (let t = 0; t < 168; t++) {
+        skillNames.forEach(skill => {
+            const req = (demandMap[t] && demandMap[t][skill]) || 0;
+            const sup = getSupply(t, skill);
+
+            // Shortage found. Find the "Smoothest" then "Cheapest" employee.
+            if (sup < req) {
+                // Find everyone who could work this shift
+                let candidates = roster.filter(e => {
+                    if (e.schedule[t]) return false; // Already working
+                    const conf = empMap.get(e.id);
+                    if (!conf.skills.includes(skill)) return false; // Wrong skill
+
+                    // Check if they are available
+                    const d = Math.floor(t / 24), h = t % 24;
+                    if (!conf.availability[d] || !conf.availability[d].includes(h)) return false; // Not available
+
+                    // Check if they can work this shift, based on their MaxHrs
+                    const maxH = parseFloat(conf.maxHrs) || 40;
+                    const ABSOLUTE_CAP = maxH + 20;
+                    const currTotal = e.schedule.filter(s => s).length;
+
+                    return currTotal < ABSOLUTE_CAP;
+                });
+
+                if (candidates.length > 0) {
+                    // Score Candidates by Smoothness and Cost
+                    candidates.forEach(c => {
+                        const conf = empMap.get(c.id);
+                        const wage = parseFloat(c.pay) || 20;
+                        const maxH = parseFloat(conf.maxHrs) || 40;
+                        const currTotal = c.schedule.filter(s => s).length;
+                        // Calculate Financial Cost as a Tie-Breaker for selection
+                        const isOT = currTotal >= maxH;
+                        const marginalCost = isOT ? (wage * 1.5) : wage;
+                        // Calculate Smoothness Tier as the Primary Selector
+                        // Massive bonuses are used to ensure Smoothness overrules Wage costs.
+                        let smoothBonus = 0;
+                        const prev = c.schedule[t - 1];
+                        const next = c.schedule[t + 1];
+
+                        if (prev && next) {
+                            smoothBonus = 2000000; // Largest bonus to bridge a shift gap
+                        } else if (prev || next) {
+                            smoothBonus = 1000000; // Reduced bonus to Extend a shift
+                        }
+                        // Fill-In Score: Lower is Better
+                        c.repairScore = marginalCost - smoothBonus;
+                    });
+
+                    // Sort: Lowest Score First
+                    candidates.sort((a, b) => a.repairScore - b.repairScore);
+                    const pick = candidates[0];
+                    const d = Math.floor(t / 24), h = t % 24;
+                    // Apply the best slot
+                    pick.schedule[t] = skill;
+
+                    // Log the actions, to be displayed in the console
+                    fixes.push({
+                        Type: "Demand Fix",
+                        Employee: pick.id,
+                        Time: `Day ${d} @ ${h}:00`,
+                        Action: `Assigned ${skill}`
+                    });
+                }
+            }
+        });
+    }
+
+    // Log the shift repairs in the console
+    if (fixes.length > 0) {
+        console.log("%c--- SCHEDULE REPAIR LOG ---", "color: #e67e22; font-weight: bold;");
+        console.table(fixes);
+    }
+    return roster;
 }
 
 // ============================================================================
 // BUILD LP STRING & SOLVE
 // ============================================================================
-/**This function builds a CPLEX LP string and finds a near-optimal solution within
- * 5-minutes before time-out.  It then takes this allocation of employees by role
- * and hour and smooths it out using a greedy heuristic.  It takes the output of 
- * the optimization problem and re-allocates employees between roles in order to 
- * smooth out any over- or under-allocation of roles and skills.
- * The goal is to make the schedule as even as possible. This is done by
- * re-allocating employees from over-allocated skills and roles to
- * under-allocated skills and roles, spreading surplus labor is as even as possible.
- * This is computationally light and exactness is not critical for smoothness
- * So it is best handled post-solve, rather than increasing the complexity of
- * the financially motivated LP Solver.
+/* This function builds a CPLEX LP string and finds a near-optimal solution within
+ * the specified time limit, or until an optimal solution is found.  It then takes 
+ * the solution and re-allocates this allocation of employees by role and hour and 
+ * smooths it out using a greedy heuristic.  It takes the output of the optimization
+ * problem and re-allocates employees between roles in order to smooth out any over- 
+ * or under-allocation of roles and skills. These allocations are then fed back into
+ * the solver with weights to help find an improved solution.  This can be tweaked
+ * using the final constants defined at the top of the script.  A final smoothing is
+ * then done, and returned to be displayed in the schedule.js script. 
+ * * Minimize Z = (Wages) + (Penalties) + (Contiguity Cost) - (Warm Start Bonus)
  * @param {Array} roster - The list of employees and their schedules.
  * @param {Array} demands - The list of roles and their demand at each time step.
  * @param {Array} skillNames - The list of skill names.
@@ -114,19 +287,23 @@ function smoothSkillAllocation(roster, demands, skillNames) {
 async function solveSchedulingMILP(params) {
     if (!highsModule) await highsModulePromise;
 
+    const GLOBAL_TIME_LIMIT = 420;  // This is the total Solver Time Limit
+    const INTERVAL = 210;           // How long each sub-solver should run for in seconds
+    const DEMAND_PENALTY = 600;     // This is the penalty for each unmet demand hour
+    const MIN_HR_PENALTY = 500;     // This is the penalty for each unmet minimum hour  
+    const WARM_START_BONUS = 30;    // This is a weight applied to each successive solve, acting as a "gradient-step".
+
     const { employees, demands, preferredEmployees } = params;
     const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
 
-    // Workforce Cap: Hard limit on total unique employees scheduled
     const preferredCount = parseInt(preferredEmployees) || employees.length;
 
     // ============================================================================
-    // DATA PRE-PROCESSING
+    // PARAMETERS PRE-PROCESSING
     // ============================================================================
-    
-    // Float32Array is ideal for large sparse matrices
-    const validHours = new Set();
+    const validHours = new Set();   // Float32Array is ideal for large sparse matrices
     const skillDemandAtT = Array.from({ length: 168 }, () => new Float32Array(skillNames.length));
+
     // Identify hours where there is demand, Variables outside these hours are pruned.
     demands.forEach(d => {
         const t = d.day * 24 + d.hour;
@@ -141,296 +318,371 @@ async function solveSchedulingMILP(params) {
         if (globalD > 0) validHours.add(t);
     });
 
-    // Constants & Penalties
-    const DEMAND_PENALTY = 500; // per hour of missing customer demand
-    const MIN_HR_PENALTY = 500; // if employee misses min-hours guarantee
+    // Returns sorted list of valid hours for an employee on a specific day
+    const getEmpDayAvail = (emp, d) => {
+        return (emp.availability[d] || [])
+            .map(Number)
+            .filter(h => validHours.has(d * 24 + h))
+            .sort((a, b) => a - b);
+    };
 
-    let objTerms = [];
+    // ============================================================================
+    // CONSTRAINT GENERATION
+    // ============================================================================
     let constraints = [];
     let binaries = new Set();
     let continuous = [];
-
-    // Tracker for Demand Constraints (LHS of equation)
+    // Tracker to link Employee Variables to Demand Constraints
     const demandConstraintLHS = Array.from({ length: 168 }, () => skillNames.map(() => []));
 
-    // ============================================================================
-    // EMPLOYEE MODELING
-    // ============================================================================
+    // --- Employee Constraints ---
     employees.forEach((emp, eIdx) => {
-        const base = parseFloat(emp.pay) || 20;
-        const maxH = parseFloat(emp.maxHrs) || 40;
         const minH = parseFloat(emp.minHrs) || 0;
-        const maxOT = 20;
+        const maxH = parseFloat(emp.maxHrs) || 40;
+        let empAllY = [];           // Track all hours worked in week
+        let empDailyActive = [];    // Track all active days in week
 
-        // Skill Mapping: Convert string skills to indices
-        const mySkills = (emp.skills || []).map(s => s.trim());
-        const mySkillIndices = mySkills.map(s => skillNames.indexOf(s)).filter(i => i !== -1);
-
-        /**============================================================================
-         * PAYROLL VARIABLES
-         * ============================================================================
-         * reg: Regular hours worked (up to the employee's max, or 40)
-         * ot:  Overtime hours (up to 20 hours above the regular max)
-         * s_min: Slack variable for minimum hours
+        // --------------------------------------------------------------------
+        // VARIABLE DEFINITIONS
+        // --------------------------------------------------------------------
+        /* uEmp: Global Active (1 if working this week, 0 otherwise)
+         * reg/ot: Payroll buckets for Regular and Overtime hours
+         * s_min: Slack variable for missing minimum hours (Cost = Penalty)
          */
-        continuous.push(`reg_${eIdx}`, `ot_${eIdx}`, `s_min_${eIdx}`);
-        objTerms.push(
-            `${fmt(base)} reg_${eIdx}`,
-            `${fmt(base * 1.5)} ot_${eIdx}`,
-            `${fmt(MIN_HR_PENALTY)} s_min_${eIdx}`
-        );
+        continuous.push(`uEmp_${eIdx}`, `reg_${eIdx}`, `ot_${eIdx}`, `s_min_${eIdx}`);
 
-        let empAllY = [];
-        let empDailyActive = [];
-
-        // Loop Days (0-6)
         for (let d = 0; d < 7; d++) {
-            // Prune Availability: Intersect Employee Availability with Store Hours
-            const avail = (emp.availability[d] || [])
-                .map(Number)
-                .filter(h => validHours.has(d * 24 + h))
-                .sort((a, b) => a - b);
-
+            const avail = getEmpDayAvail(emp, d);
             if (avail.length === 0) continue;
-
-            // Bounds for Continuous Vars based on availability
+            // Determine earliest and latest hours available
             const earliest = avail[0];
             const latest = avail[avail.length - 1];
 
-            /**============================================================================
-             * DAILY BLOCK VARIABLES
-             * ============================================================================
-             * da: Day Active (Binary) - 1 if employee works at all this day.
-             * start: Continuous (0-24) - The start hour of the shift.
-             * end: Continuous (0-24) - The end hour of the shift.
+            // ----------------------------------------------------------------
+            // SHIFT VARIABLES (Continuous Implementation)
+            // ----------------------------------------------------------------
+            /* da_e_d:    Day Active (Binary-ish). 1 if working, 0 if off.
+             * start_e_d: The hour the shift starts (0.0 - 24.0)
+             * end_e_d:   The hour the shift ends (0.0 - 24.0)
              */
             const da = `da_${eIdx}_${d}`;
             const startVal = `start_e${eIdx}_d${d}`;
             const endVal = `end_e${eIdx}_d${d}`;
+            continuous.push(da, startVal, endVal);
 
-            binaries.add(da);
-            continuous.push(startVal, endVal);
-
-            /**============================================================================
-             * CONTIGUITY OBJECTIVE FUNCTION (The Gap Penalty)
-             * ============================================================================
-             * Goal: Enforce the rule that all hours worked by an employee in a day must 
-             * equal the difference between the first and last hour they work in that day.
-             * * Mathematical Logic: Penalty = Cost * (End - Start - Sum of Hours Worked)
-             * By minimizing this difference, the solver is forced to eliminate "gaps" 
-             * within a shift. If (End - Start) > Sum(y), the objective value is 
-             * penalized, incentivizing the solver to cluster all 'y' (working hours) 
-             * into a single contiguous block between the start and end variables.
+            // ----------------------------------------------------------------
+            // SHIFT BOUNDARIES (The "Big M" Logic)
+            // ----------------------------------------------------------------
+            /* If da=0 (Not working), force Start and End to 0.
+             * If da=1 (Working), Start must be >= Earliest, End <= Latest.
+             * Mathematical Form: Start - (Earliest * da) >= 0
              */
-            const GAP_PENALTY = base * 2.0; // Double the wage cost for each gap hour
-
-            objTerms.push(
-                `${fmt(GAP_PENALTY)} ${endVal}`,
-                `-${fmt(GAP_PENALTY)} ${startVal}`,
-                `${fmt(GAP_PENALTY)} ${da}` // Base cost for turning on a day
-            );
-
-            // Bounds Logic: If da=0, Start/End must be 0.
+            constraints.push(` s_e_${eIdx}_d${d}: ${startVal} - ${earliest} ${da} >= 0`);
             constraints.push(` b_min_${eIdx}_d${d}: ${startVal} - ${earliest} ${da} >= 0`);
             constraints.push(` b_max_${eIdx}_d${d}: ${endVal} - ${latest} ${da} <= 0`);
+
+            // Hard Cap at 24 Hours
             constraints.push(` z_s_${eIdx}_d${d}: ${startVal} - 24 ${da} <= 0`);
             constraints.push(` z_e_${eIdx}_d${d}: ${endVal} - 24 ${da} <= 0`);
-            
-            // Loop Hours in Day
-            const dayY = [];
+
+            let dayY = [];
+
+            // ----------------------------------------------------------------
+            // HOURLY LOGIC CONSTRAINTS
+            // ----------------------------------------------------------------
             avail.forEach(h => {
                 const t = d * 24 + h;
+                // Employee Skill Check
+                const mySkills = (emp.skills || []).map(s => s.trim());
+                let canCoverDemand = false;
+                mySkills.forEach(s => {
+                    const sIdx = skillNames.indexOf(s);
+                    // Only create variables if demand actually exists
+                    if (sIdx !== -1 && skillDemandAtT[t][sIdx] > 0) canCoverDemand = true;
+                });
+                if (!canCoverDemand) return;
+
+                // ------------------------------------------------------------
+                // CORE WORKING BINARY: y_{e,t} (1 if e working at t, 0 if off)
+                // ------------------------------------------------------------
                 const y = `y_${eIdx}_${t}`;
                 binaries.add(y);
                 dayY.push(y);
                 empAllY.push(y);
-                // Credit the penalty for every hour worked (Part of Contiguity Logic)
-                objTerms.push(`-${fmt(GAP_PENALTY)} ${y}`);
 
-                /**============================================================================
-                 * SHIFT SPAN CONSTRAINTS
-                 * ============================================================================
-                 * 1. Start Constraint: Start <= h (if working) - Eq: Start + 24*y <= h + 24
-                 * If y=1: Start <= h; If y=0: Start <= h + 24
-                 * * 2. End Constraint: End >= h (if working) - Eq: End - h*y >= 0
-                 * If y=1: End >= h; If y=0: End >= 0 
+                // ------------------------------------------------------------
+                // CONTIGUITY "SQUEEZE" CONSTRAINTS
+                // ------------------------------------------------------------
+                /* If y=1 (Working), then the continuous Start/End variables
+                 * must "bracket" this hour.
                  */
+                // Start Time Constraint: Start <= Hour (if y=1)
                 constraints.push(` s_set_${eIdx}_${t}: ${startVal} + 24 ${y} <= ${h + 24}`);
+                // End Time Constraint: End >= Hour (if y=1)                
                 constraints.push(` e_set_${eIdx}_${t}: ${endVal} - ${h} ${y} >= 0`);
+                // Activation Link: If y=1, Day Active (da) MUST be 1.
+                constraints.push(` da_lk_${eIdx}_${t}: ${y} - ${da} <= 0`);
 
-                /**============================================================================
-                 * ASSIGNMENT VARIABLES (Continuous Relaxation)
-                 * ============================================================================
-                 * CONSTRAINT: Sum(w) - y = 0, where w: Assignment Variables (0.0 - 1.0).
-                 * These are assigned as continuous to minimize binaries in our model, which
-                 * will help reduce the complexity of branch and bound. Since 'y' is binary, 
-                 * 'w' is forced to sum to 0 or 1. This effectively makes 'w' behave like a 
-                 * binary decision variable without the computational cost of branching on it.
-                 */
-                const validWs = [];
-
-                mySkillIndices.forEach(sIdx => {
-                    // Only generate assignment variable if Demand > 0
-                    if (skillDemandAtT[t][sIdx] > 0) {
+                // ------------------------------------------------------------
+                // SKILL ASSIGNMENT (w_{e,t,s})
+                // ------------------------------------------------------------
+                // If working (y=1), must be assigned exactly ONE skill.
+                let validWs = [];
+                mySkills.forEach(s => {
+                    const sIdx = skillNames.indexOf(s);
+                    if (sIdx !== -1 && skillDemandAtT[t][sIdx] > 0) {
                         const w = `w_${eIdx}_${t}_${sIdx}`;
-                        continuous.push(w);
-                        demandConstraintLHS[t][sIdx].push(w);
+                        continuous.push(w);         // Relaxed binary (0-1 continuous)
                         validWs.push(w);
-
-                        // Upper Bound Help: w <= y
+                        // Register variable for the Demand Constraint
+                        demandConstraintLHS[t][sIdx].push(w);
+                        // Bound: You can't perform a skill if you aren't working (w <= y)
                         constraints.push(` w_bnd_${eIdx}_${t}_${sIdx}: ${w} - ${y} <= 0`);
                     }
                 });
 
                 if (validWs.length > 0) {
-                    // Strict Link: You must be assigned to a skill if you are working (y=1)
+                    // Equality: Sum(Skills) == Working Status
                     constraints.push(` lnk_w_${eIdx}_${t}: ${validWs.join(" + ")} - ${y} = 0`);
                 } else {
-                    // If no demand exists for your skills, you cannot work.
+                    // Force y=0 if no valid skills exist for the demand
                     constraints.push(` no_dem_${eIdx}_${t}: ${y} = 0`);
                 }
             });
 
-            // Link Day Active (da) to Hourly Active (y)
+            // ------------------------------------------------------------
+            // DAY ACTIVATION LINKING
+            // ------------------------------------------------------------
+            /* Sum(Hours Worked) <= 24 * da
+             * Ensures da cannot be 0 if any y variables are 1.
+             */
             if (dayY.length > 0) {
                 constraints.push(` set_da_${eIdx}_d${d}: ${dayY.join(" + ")} - 24 ${da} <= 0`);
                 empDailyActive.push(da);
             }
         }
 
-        // WEEKLY BALANCING CONSTRAINTS
+        // --------------------------------------------------------------------
+        // PAYROLL & LABOR LAW CONSTRAINTS
+        // --------------------------------------------------------------------
         const workSum = empAllY.length > 0 ? empAllY.join(" + ") : "0";
-        constraints.push(` bal_${eIdx}: ${workSum} - reg_${eIdx} - ot_${eIdx} = 0`);
-        constraints.push(` max_${eIdx}: reg_${eIdx} <= ${fmt(maxH)}`);
-        constraints.push(` min_${eIdx}: reg_${eIdx} + ot_${eIdx} + s_min_${eIdx} >= ${fmt(minH)}`);
-        constraints.push(` ot_${eIdx}: ot_${eIdx} <= ${fmt(maxOT)}`);
 
-        // Global Active Link (for Workforce Cap)
+        // Sum(y) = Regular + Overtime
+        constraints.push(` bal_${eIdx}: ${workSum} - reg_${eIdx} - ot_${eIdx} = 0`);
+        // Max Hours: Regular <= Contract Max
+        constraints.push(` max_${eIdx}: reg_${eIdx} <= ${fmt(maxH)}`);
+        // Min Hours: Regular + OT + Slack >= Contract Min
+        constraints.push(` min_${eIdx}: reg_${eIdx} + ot_${eIdx} + s_min_${eIdx} >= ${fmt(minH)}`);
+        // OT Cap: Hard limit on overtime (e.g., max 20 hours OT)
+        constraints.push(` ot_${eIdx}: ot_${eIdx} <= 20`);
+
+        // Global Activation Link: If any day active, uEmp must be 1.
         const u = `uEmp_${eIdx}`;
-        binaries.add(u);
         empDailyActive.forEach(da => constraints.push(` lnk_u_${eIdx}_${da}: ${da} - ${u} <= 0`));
     });
 
-    /**============================================================================
-     * DEMAND SATISFACTION
-     * ============================================================================
-     * Equation: Sum(w_assigned_to_skill) + Slack >= Demand
-     * The sum of assigned skills must be greater than or equal to the demand; it is
-     * acceptable to exceed demand level--although suboptimal from a cost perspective.
-     */
+    // --- Demand Constraints ---
     validHours.forEach(t => {
         skillNames.forEach((_, sIdx) => {
             const req = skillDemandAtT[t][sIdx];
             if (req > 0) {
-                const slack = `s_dem_${sIdx}_${t}`;
-                continuous.push(slack);
-                // Penalty for missing demand
-                objTerms.push(`${fmt(DEMAND_PENALTY)} ${slack}`);
-
                 const workers = demandConstraintLHS[t][sIdx];
                 const lhs = workers.length > 0 ? workers.join(" + ") : "0";
+                const slack = `s_dem_${sIdx}_${t}`;     // Allows under-staffing for a penalty
+                continuous.push(slack);
                 constraints.push(` dem_${sIdx}_${t}: ${lhs} + ${slack} >= ${fmt(req)}`);
             }
         });
     });
 
-    // Workforce Cap Constraint
+    // --- Workforce Cap ---
     const allU = employees.map((_, i) => `uEmp_${i}`);
     constraints.push(` wf_cap: ${allU.join(" + ")} <= ${fmt(preferredCount)}`);
 
-    // ============================================================================
-    // SOLVE EXECUTION
-    // ============================================================================
-    const lpString = [
-        "Minimize", " obj: " + objTerms.join(" + "),
+    // --- Formatting Bounds ---
+    const relaxedBounds = continuous
+        .filter(c => c.startsWith('da_') || c.startsWith('uEmp_') || c.startsWith('w_'))
+        .map(c => `${c} <= 1`)
+        .join("\n");
+
+    // --- Compile LP Body ---
+    const lpBody = [
         "Subject To", ...constraints,
         "Binaries", Array.from(binaries).join("\n"),
-        "Bounds", continuous.map(c => `${c} >= 0`).join("\n"),
+        "Bounds",
+        continuous.map(c => `${c} >= 0`).join("\n"),
+        relaxedBounds,
         "End"
     ].join("\n");
 
-    console.time("SolverDuration");
-    try {
-        const result = highsModule.solve(lpString, {
-            time_limit: 300, // 5 minute time limit for the solver
-            presolve: 'on', // Critical for removing redundant constraints
-            mip_rel_gap: 0.05 // 5% tolerance for optimiality gap
-        });
-        console.timeEnd("SolverDuration");
 
+    // ============================================================================
+    // ITERATIVE SOLVER LOOP
+    // ============================================================================
+    let timeRemaining = GLOBAL_TIME_LIMIT;
+    let currentRoster = null;       // Holds the smoothed roster for next iteration's bias
+    let bestSolution = null;        // Stores the best solution found so far
+    let minTotalCost = Infinity;    // Stores the lowest total cost found so far
+    console.time("TotalSolverDuration");
+
+    while (timeRemaining > 0) {
+        console.log(`%c--- SOLVER INTERVAL: ${GLOBAL_TIME_LIMIT - timeRemaining}s (Remaining: ${timeRemaining}s) ---`, "color: blue; font-weight: bold;");
+
+        // --- DYNAMIC OBJECTIVE FUNCTION GENERATOR ---
+        // Rebuild the Objective Function every loop, to apply feasible region weights
+        let objTerms = [];
+
+        employees.forEach((emp, eIdx) => {
+            const base = parseFloat(emp.pay) || 20;
+            const gP = base * 2.0;          // Gap Penalty Factor
+
+            // Payroll Costs (Minimize Wages)
+            objTerms.push(`${fmt(base)} reg_${eIdx}`);
+            objTerms.push(`${fmt(base * 1.5)} ot_${eIdx}`);
+            objTerms.push(`${fmt(MIN_HR_PENALTY)} s_min_${eIdx}`);
+
+            for (let d = 0; d < 7; d++) {
+                const avail = getEmpDayAvail(emp, d);
+                if (avail.length === 0) continue;
+
+                // ------------------------------------------------------------
+                // CONTIGUITY PENALTY
+                // ------------------------------------------------------------
+                /* Cost = Penalty * (End - Start - HoursWorked)
+                 * This penalizes unscheduled gaps inside a shift, by penalizing
+                 * gaps greater than worked or OT hours.
+                 */
+                objTerms.push(`${fmt(gP)} end_e${eIdx}_d${d}`);
+                objTerms.push(`-${fmt(gP)} start_e${eIdx}_d${d}`);
+                objTerms.push(`${fmt(gP)} da_${eIdx}_${d}`);
+
+                avail.forEach(h => {
+                    const t = d * 24 + h;
+                    // Subtract 1 unit of Penalty for every hour actually worked
+                    objTerms.push(`-${fmt(gP)} y_${eIdx}_${t}`);
+
+                    // ------------------------------------------------------------
+                    // WARM START BIAS
+                    // ------------------------------------------------------------
+                    /* If this employee worked this specific hour in the previous "Best"
+                     * schedule, we give a discount (negative cost) to working it again.
+                     * This creates a "gravity well" around the previous solution. In
+                     * which feasible solutions are used to build a more optimal solution.
+                     */
+                    if (currentRoster && currentRoster[eIdx].schedule[t]) {
+                        objTerms.push(`-${fmt(WARM_START_BONUS)} y_${eIdx}_${t}`);
+                    }
+                });
+            }
+        });
+
+        // Demand Penalties to Minimize Demand Slack
+        validHours.forEach(t => {
+            skillNames.forEach((_, sIdx) => {
+                if (skillDemandAtT[t][sIdx] > 0) {
+                    objTerms.push(`${fmt(DEMAND_PENALTY)} s_dem_${sIdx}_${t}`);
+                }
+            });
+        });
+
+        // Combine Dynamic Head + Static Body (CONSTRAINTS)
+        const currentLPString = "Minimize\n obj: " + objTerms.join(" + ") + "\n" + lpBody;
+
+        // --- SOLVE ---
+        const result = highsModule.solve(currentLPString, {
+            time_limit: INTERVAL,
+            presolve: 'on',
+            mip_rel_gap: 0.05   // Stop if within 5% of mathematical perfection
+        });
+
+        // If this interval fails, return the last known good solution.
         if (!result.Columns) {
-            console.error("Solver Failed", result.Status);
-            return { status: result.Status };
+            console.warn("Solver Interval returned no columns (Infeasible/Timeout). Reverting to best found.");
+            break;
         }
 
-        // ============================================================================
-        // POST-PROCESSING & REPORTING
-        // ============================================================================
-
-        // Reconstruct Roster from Solver Output
+        // --- PARSE & SMOOTH ---
         let rawRoster = employees.map((emp, eIdx) => {
             let schedule = Array(168).fill(null);
             for (let t = 0; t < 168; t++) {
-                if (result.Columns[`y_${eIdx}_${t}`]?.Primal > 0.5) {
-                    // Identify assigned skill from continuous 'w' variables
+                // If binary y > 0.5, the employee is working
+                if ((result.Columns[`y_${eIdx}_${t}`]?.Primal || 0) > 0.5) {
                     let assignedRole = "Assigned";
                     let maxVal = 0;
+                    // Find which 'w' skill variable is active
                     skillNames.forEach((s, sIdx) => {
                         const val = result.Columns[`w_${eIdx}_${t}_${sIdx}`]?.Primal || 0;
-                        if (val > 0.5) {
-                            assignedRole = s;
-                        } else if (val > maxVal) {
-                            maxVal = val;
-                            if (val > 0.1) assignedRole = s;
-                        }
+                        if (val > 0.5) assignedRole = s;
+                        else if (val > maxVal && val > 0.1) { maxVal = val; assignedRole = s; }
                     });
                     schedule[t] = assignedRole;
                 }
             }
             return {
-                id: emp.id,
-                skills: emp.skills,
-                pay: parseFloat(emp.pay) || 15,
+                id: emp.id, skills: emp.skills, pay: parseFloat(emp.pay) || 15,
                 schedule,
                 regHrs: result.Columns[`reg_${eIdx}`]?.Primal || 0,
                 otHrs: result.Columns[`ot_${eIdx}`]?.Primal || 0
             };
         });
 
-        // Run Heuristic Smoother (Cleanup)
-        const finalRoster = smoothSkillAllocation(rawRoster, demands, skillNames);
+        // Apply Heuristic Smoothing
+        const smoothedRoster = smoothSkillAllocation(rawRoster, demands, skillNames, employees);
 
-        // Calculate Financials (Objective Function is skewed by penalties)
-        let totalWages = 0;
-        let totalOT = 0;
-        finalRoster.forEach(emp => {
-            totalWages += (emp.regHrs * emp.pay);
-            totalOT += (emp.otHrs * emp.pay * 1.5);
+        // --- CALCULATE WAGES ---
+        let tWages = 0;
+        let tOT = 0;
+        smoothedRoster.forEach(e => {
+            tWages += (e.regHrs * e.pay);
+            tOT += (e.otHrs * e.pay * 1.5);
         });
+        const currentRealCost = tWages + tOT;
 
-        // Generate Console Output
-        console.log("%c--- FINANCIAL SUMMARY ---", "color: #0b8f0bff; font-weight: bold;");
-        console.table({
-            "Solver Objective (Abstract)": { Value: result.ObjectiveValue.toFixed(2) },
-            "Real Regular Wages": { Value: `$${totalWages.toLocaleString()}` },
-            "Real Overtime Wages": { Value: `$${totalOT.toLocaleString()}` },
-            "TOTAL ESTIMATED COST": { Value: `$${(totalWages + totalOT).toLocaleString()}` }
-        });
+        console.log(`Interval Result: Cost $${currentRealCost.toFixed(2)} (Objective: ${result.ObjectiveValue.toFixed(2)})`);
 
-        return {
-            status: 'Optimal',
-            result: {
-                roster: finalRoster,
-                objective: result.ObjectiveValue, // Abstract Score
-                overTime: totalOT,
-                actualLaborCost: (totalWages + totalOT).toFixed(2) // Real Labor Costs
-            }
-        };
+        // Update loop state for next "Warm Start" iteration
+        currentRoster = smoothedRoster;
 
-    } catch (e) {
-        console.error("Solver Error:", e);
-        return { status: 'Error', error: e.message };
+        // Compare Wages to the best solution found so far
+        if (currentRealCost < (minTotalCost - 0.01)) {
+            console.log(`>> Improvement Found! ($${minTotalCost.toFixed(2)} -> $${currentRealCost.toFixed(2)})`);
+            // Store the new best solution
+            minTotalCost = currentRealCost;
+            bestSolution = {
+                status: 'Optimal',
+                result: {
+                    roster: smoothedRoster,
+                    objective: result.ObjectiveValue,
+                    overTime: tOT,
+                    actualLaborCost: currentRealCost.toFixed(2)
+                }
+            };
+        } else {
+            // If no improvement, terminate the solver
+            console.log(`>> No improvement in Labor Cost. (Current: $${currentRealCost.toFixed(2)} vs Best: $${minTotalCost.toFixed(2)})`);
+            break;
+        }
+
+        // If the global time limit has been reached, stop the solver
+        timeRemaining -= INTERVAL;
+        if (timeRemaining <= 0) console.log(">> Global Time Limit Reached.");
     }
+
+    console.timeEnd("TotalSolverDuration");
+
+    // ============================================================================
+    // RETURN BEST FOUND SOLUTION
+    // ============================================================================
+    if (bestSolution) {
+        console.log("%c--- FINANCIAL SUMMARY (BEST) ---", "color: #0b8f0bff; font-weight: bold;");
+        console.table({
+            "Solver Objective": { Value: bestSolution.result.objective.toFixed(2) },
+            "Total Labor Cost": { Value: `$${bestSolution.result.actualLaborCost}` }
+        });
+        return bestSolution;
+    }
+
+    return { status: 'Error', error: "Loop failed to produce any feasible result" };
 }
 
 // ------------------------------------------------------------------------
@@ -448,6 +700,6 @@ self.onmessage = async function (e) {
         const output = await solveSchedulingMILP(data);
         // Post a message back to the main thread with the result data;
         // The spread operator (...) merges the result object with the type field
-        self.postMessage({ type: 'result', ...output }); 
+        self.postMessage({ type: 'result', ...output });
     }
 };
