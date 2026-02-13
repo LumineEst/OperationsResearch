@@ -16,10 +16,23 @@ window.ScheduleModule = {
 
     //Initializes module event listeners and binds UI controls to the solver request cycle.
     init() {
-        ['employeeCount', 'minRest', 'maxShift', 'hourlyRate'].forEach(id => {
+        ['minRest', 'maxShift', 'hourlyRate'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => this.requestSolve());
         });
+
+        // Add event listener for employee count input
+        const empCountInput = document.getElementById('employeeCount');
+        if (empCountInput) {
+            empCountInput.addEventListener('change', () => this.requestSolve());
+            empCountInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    empCountInput.blur();
+                    this.requestSolve();
+                }
+            });
+        }
 
         // Add event listener for employee search and list connectivity
         document.getElementById('employeeSearch')?.addEventListener('input', (e) => {
@@ -81,7 +94,7 @@ window.ScheduleModule = {
         if (window.resetGlobalKPI) window.resetGlobalKPI();
 
         // Restart the global solver countdown, and render the solver dashboard
-        window.schedState.solverTimeLeft = 420;
+        window.schedState.solverTimeLeft = 600;
         this.startGlobalTicker();
         this.renderSolverDashboard();
 
@@ -175,18 +188,16 @@ window.ScheduleModule = {
 
         // Calculate the total number of parameters in the model
         const E = window.schedState.employees.length; // Number of employees
-        const S = 5; // Number of skill levels (1-5)
-        const T = 168; // Number of hours in a day
+        const S = this.skillNames.length; // Number of skill levels (1-5)
+        const T = 77; // Number of hours in a week
         const D = 7; // Number of days in a week
 
-        // Global parameters
-        const totalParameters = (T * S) + (E * T) + (E * D * 2) + (E * 4) + 10; // Total number of parameters
         // Binary decision variables
-        const binaryVars = (E * T) + (E * D) + E; // Total number of binary decision variables
+        const binaryVars = (E * T); // Total number of binary decision variables
         // Continuous decision variables = Assignments + Shift Bounds + Demand Slack
-        const continuousVars = (E * T * S) + (E * D * 2) + (E * 3) + (T * S); // Total number of continuous decision variables
+        const continuousVars = (E * T * S) + (E * D * 3) + (E * 4) + (T * S); // Total number of continuous decision variables
         // Total constraints = Demand Satisfaction + Skill Linking and Bounds + Daily Shift Logic + Balancing Capacity and Global Links
-        const totalConstraints = (T * S) + ((E * T) + (E * T * S)) + ((E * D * 4) + (E * T * 2)) + ((E * 4) + 1 + (E * D)); // Total number of constraints
+        const totalConstraints = (E * T * 4) + (E * D * 6) + (E * T * S * 1) + + (E * S) + (E * 4) + (T * S) + 1; // Total number of constraints
 
         // Calculate the time left in minutes and seconds
         const mins = Math.floor(window.schedState.solverTimeLeft / 60);
@@ -205,7 +216,6 @@ window.ScheduleModule = {
                 <div class="metrics-grid">
                     <h4>Model Complexity</h4>
                     <table class="metrics-table">
-                        <tr><td>Global Parameters:</td><td>${totalParameters.toLocaleString()}</td></tr>
                         <tr><td>Binary Decision Variables:</td><td>${binaryVars.toLocaleString()}</td></tr>
                         <tr><td>Continuous Decision Variables:</td><td>${continuousVars.toLocaleString()}</td></tr>
                         <tr><td>Constraints:</td><td>${totalConstraints.toLocaleString()}</td></tr>
@@ -492,6 +502,80 @@ window.ScheduleModule = {
         recContainer.innerHTML = html; // Render the HTML in the container
     },
 
+    /**
+    * Orchestrates the Golden Section Search using the WorkforceOptimizer class.
+    * Updates the UI with status messages, runs the search, and applies the optimal result.
+    */
+    async runStaffingOptimizer() {
+        if (!window.schedState.employees.length) return;
+
+        const btn = document.getElementById('btnOptimizeStaff');
+        const statusContainer = document.getElementById('scheduling-panel-sub');
+        const originalText = btn.textContent;
+
+        // Resetting the GUI and disabling the button while the search is running
+        btn.disabled = true;
+        btn.textContent = "Running Optimization..."; {
+            if (window.currentWorker) {
+                window.currentWorker.terminate();
+                window.currentWorker = null;
+                if (this.tickerInterval) {
+                    clearInterval(this.tickerInterval);
+                    this.tickerInterval = null;
+                }
+            }
+        }
+        if (statusContainer) {
+            statusContainer.innerHTML = `
+                <div class="solver-dashboard">
+                    <div class="timer-section">
+                        <h3 style="color:#8e44ad;">Staffing Level Optimizer Active</h3>
+                        <p>Performing Multi-Thread Optimal Staffing Search...<br></p>
+                        <div class="loading-spinner"></div>
+                    </div>
+                    <div class="metrics-grid">
+                        <p>One Worker is performing a Golden Search, while the other Worker is using an opposing Bisection Search to Aggressively Prune the Search Space--reducing search time by almost 40%<br>Iterations may be tracked using the Browser's Developer Tools.</p>
+                        <p>This search may take up to an hour, Please wait...</p>
+                    </div>
+                </div>`;
+        }
+
+        try {
+            // Prepare Data
+            const params = {
+                employees: JSON.parse(JSON.stringify(window.schedState.employees)),
+                demands: JSON.parse(JSON.stringify(window.schedState.demands))
+            };
+
+            // Instantiate and Run Optimizer with 2 workers for parallel search steps
+            const optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 2);
+            const bestResult = await optimizer.findOptimalHeadcount(params);
+
+            // Apply Results
+            if (bestResult) {
+                // Update Global State and Preferred Employee Input Field
+                window.schedState.results = bestResult; // The full result object
+                const optimalCount = bestResult.optimalHeadcount || document.getElementById('employeeCount').value;
+                document.getElementById('employeeCount').value = optimalCount;
+                if (window.updateResultsUI) {
+                    window.updateResultsUI();
+                }
+                // Render Charts
+                this.drawCharts();
+                updateStatus(`Optimization Complete: ${optimalCount} Employees`, "optimal");
+            }
+
+        } catch (err) {
+            console.error("Optimization Error:", err);
+            updateStatus("Optimization Failed", "error");
+            if (statusContainer) statusContainer.innerHTML = `<div class="error-state">Optimization failed: ${err.message}</div>`;
+        } finally {
+            // Reset Button State
+            btn.disabled = false;
+            btn.textContent = originalText;
+        }
+    },
+
     /**Renders an individual weekly Gantt chart with an enlarged dynamic legend using the global initChart utility.
      * The Gantt chart shows the employee's weekly availability and role assignments in 
      * 1-hour increments for each day of the week.
@@ -627,7 +711,7 @@ window.ScheduleModule = {
      */
     renderGantt(data, dayIdx, minH, maxH, colorScale) {
         // Standardize setup while allowing the utility to clear the container.
-        const chart = window.initChart('rosterGanttContainer', { left: 80, bottom: 10}, false);
+        const chart = window.initChart('rosterGanttContainer', { left: 80, bottom: 10 }, false);
         if (!chart) return;
 
         const { svg, width } = chart;
@@ -656,7 +740,7 @@ window.ScheduleModule = {
                     ).length;
 
                     svg.append("rect")
-                        .attr("x", xScale(h)-5).attr("y", y + 12)
+                        .attr("x", xScale(h) - 5).attr("y", y + 12)
                         .attr("width", Math.max(0, (width / hoursCount) - 0.5)) // Robust width calculation
                         .attr("height", cellHeight - 4).attr("fill", colorScale(role)).attr("rx", 2)
                         .on("mouseover", (e) => {

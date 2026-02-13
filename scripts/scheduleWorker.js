@@ -231,15 +231,15 @@ function smoothSkillAllocation(roster, demands, skillNames, allEmployeeData) {
                         const next = c.schedule[t + 1];
 
                         if (prev && next) {
-                            smoothBonus = 2000000; // Largest bonus to bridge a shift gap
+                            smoothBonus = 10000000; // Largest bonus to bridge a shift gap
                         } else if (prev || next) {
                             smoothBonus = 1000000; // Reduced bonus to Extend a shift
                         }
-                        // Fill-In Score: Lower is Better
+                        // Fill-In Score - Lower is Better
                         c.repairScore = marginalCost - smoothBonus;
                     });
 
-                    // Sort: Lowest Score First
+                    // Sort by Lowest Score First
                     candidates.sort((a, b) => a.repairScore - b.repairScore);
                     const pick = candidates[0];
                     const d = Math.floor(t / 24), h = t % 24;
@@ -261,7 +261,9 @@ function smoothSkillAllocation(roster, demands, skillNames, allEmployeeData) {
     // Log the shift repairs in the console
     if (fixes.length > 0) {
         console.log("%c--- SCHEDULE REPAIR LOG ---", "color: #e67e22; font-weight: bold;");
-        console.table(fixes);
+        console.groupCollapsed(`%cSchedule Repairs: (${fixes.length} total)`, "color: #e67e22; font-weight: bold;"); 
+        console.table(fixes); 
+        console.groupEnd();
     }
     return roster;
 }
@@ -286,11 +288,11 @@ function smoothSkillAllocation(roster, demands, skillNames, allEmployeeData) {
  */
 async function solveSchedulingMILP(params) {
     if (!highsModule) await highsModulePromise;
-
-    const GLOBAL_TIME_LIMIT = 420;  // This is the total Solver Time Limit
-    const INTERVAL = 210;           // How long each sub-solver should run for in seconds
-    const DEMAND_PENALTY = 600;     // This is the penalty for each unmet demand hour
-    const MIN_HR_PENALTY = 500;     // This is the penalty for each unmet minimum hour  
+    // Interval and Global Time Limit are imbalanced to give more time to the first solver (to ensure blocking)
+    const GLOBAL_TIME_LIMIT = 600;  // This is the total Solver Time Limit
+    const INTERVAL = 360;           // How long each sub-solver should run for in seconds
+    const DEMAND_PENALTY = 6000;     // This is the penalty for each unmet demand hour
+    const MIN_HR_PENALTY = 5000;     // This is the penalty for each unmet minimum hour  
     const WARM_START_BONUS = 30;    // This is a weight applied to each successive solve, acting as a "gradient-step".
 
     const { employees, demands, preferredEmployees } = params;
@@ -526,7 +528,7 @@ async function solveSchedulingMILP(params) {
     console.time("TotalSolverDuration");
 
     while (timeRemaining > 0) {
-        console.log(`%c--- SOLVER INTERVAL: ${GLOBAL_TIME_LIMIT - timeRemaining}s (Remaining: ${timeRemaining}s) ---`, "color: blue; font-weight: bold;");
+        console.log(`%c--- INITIALIZING SOLVER INTERVAL: ${((GLOBAL_TIME_LIMIT - timeRemaining + INTERVAL)/INTERVAL).toFixed(0)} ---`, "color: blue; font-weight: bold;");
 
         // --- DYNAMIC OBJECTIVE FUNCTION GENERATOR ---
         // Rebuild the Objective Function every loop, to apply feasible region weights
@@ -534,7 +536,7 @@ async function solveSchedulingMILP(params) {
 
         employees.forEach((emp, eIdx) => {
             const base = parseFloat(emp.pay) || 20;
-            const gP = base * 2.0;          // Gap Penalty Factor
+            const gP = base * 100.0;          // Gap Penalty Factor
 
             // Payroll Costs (Minimize Wages)
             objTerms.push(`${fmt(base)} reg_${eIdx}`);
@@ -590,7 +592,7 @@ async function solveSchedulingMILP(params) {
 
         // --- SOLVE ---
         const result = highsModule.solve(currentLPString, {
-            time_limit: INTERVAL,
+            time_limit: Math.min(INTERVAL, timeRemaining), // Set solver time limit to be at most the interval
             presolve: 'on',
             mip_rel_gap: 0.05   // Stop if within 5% of mathematical perfection
         });
@@ -626,19 +628,20 @@ async function solveSchedulingMILP(params) {
             };
         });
 
-        // Apply Heuristic Smoothing
+        // Apply Heuristic Skill Smoothing and Fill-in
         const smoothedRoster = smoothSkillAllocation(rawRoster, demands, skillNames, employees);
 
         // --- CALCULATE WAGES ---
         let tWages = 0;
         let tOT = 0;
+
         smoothedRoster.forEach(e => {
             tWages += (e.regHrs * e.pay);
             tOT += (e.otHrs * e.pay * 1.5);
         });
         const currentRealCost = tWages + tOT;
 
-        console.log(`Interval Result: Cost $${currentRealCost.toFixed(2)} (Objective: ${result.ObjectiveValue.toFixed(2)})`);
+        console.log(`Interval Result for Headcount ${preferredCount}: Cost $${currentRealCost.toFixed(2)} (Objective: ${result.ObjectiveValue.toFixed(2)})`);
 
         // Update loop state for next "Warm Start" iteration
         currentRoster = smoothedRoster;
