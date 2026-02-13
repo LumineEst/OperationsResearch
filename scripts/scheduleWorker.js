@@ -289,10 +289,9 @@ function smoothSkillAllocation(roster, demands, skillNames, allEmployeeData) {
 async function solveSchedulingMILP(params) {
     if (!highsModule) await highsModulePromise;
     // Interval and Global Time Limit are imbalanced to give more time to the first solver (to ensure blocking)
-    const GLOBAL_TIME_LIMIT = 600;  // This is the total Solver Time Limit
-    const INTERVAL = 360;           // How long each sub-solver should run for in seconds
-    const DEMAND_PENALTY = 6000;     // This is the penalty for each unmet demand hour
-    const MIN_HR_PENALTY = 5000;     // This is the penalty for each unmet minimum hour  
+    const GLOBAL_TIME_LIMIT = 300;  // This is the total Solver Time Limit
+    const INTERVAL = 300;           // How long each sub-solver should run for in seconds
+    const MIN_HR_PENALTY = 500000;     // This is the penalty for each unmet minimum hour  
     const WARM_START_BONUS = 30;    // This is a weight applied to each successive solve, acting as a "gradient-step".
 
     const { employees, demands, preferredEmployees } = params;
@@ -490,9 +489,7 @@ async function solveSchedulingMILP(params) {
             if (req > 0) {
                 const workers = demandConstraintLHS[t][sIdx];
                 const lhs = workers.length > 0 ? workers.join(" + ") : "0";
-                const slack = `s_dem_${sIdx}_${t}`;     // Allows under-staffing for a penalty
-                continuous.push(slack);
-                constraints.push(` dem_${sIdx}_${t}: ${lhs} + ${slack} >= ${fmt(req)}`);
+                constraints.push(` dem_${sIdx}_${t}: ${lhs} >= ${fmt(req)}`);
             }
         });
     });
@@ -576,15 +573,6 @@ async function solveSchedulingMILP(params) {
                     }
                 });
             }
-        });
-
-        // Demand Penalties to Minimize Demand Slack
-        validHours.forEach(t => {
-            skillNames.forEach((_, sIdx) => {
-                if (skillDemandAtT[t][sIdx] > 0) {
-                    objTerms.push(`${fmt(DEMAND_PENALTY)} s_dem_${sIdx}_${t}`);
-                }
-            });
         });
 
         // Combine Dynamic Head + Static Body (CONSTRAINTS)
