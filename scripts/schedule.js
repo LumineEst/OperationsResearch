@@ -92,9 +92,10 @@ window.ScheduleModule = {
         if (!window.schedState.employees.length) return;
         // Reset KPI Scorecard
         if (window.resetGlobalKPI) window.resetGlobalKPI();
-
         // Restart the global solver countdown, and render the solver dashboard
-        window.schedState.solverTimeLeft = 600;
+        const totalEmps = window.schedState.employees.length;
+        const inputVal = document.getElementById('employeeCount')?.value;
+        window.schedState.solverTimeLeft = ((parseInt(inputVal) || totalEmps) < totalEmps) ? 360 : 300;
         this.startGlobalTicker();
         this.renderSolverDashboard();
 
@@ -117,18 +118,15 @@ window.ScheduleModule = {
             // Decrement the solver time left
             window.schedState.solverTimeLeft = 0;
             clearInterval(this.tickerInterval);
-
             // Get the message type, status, and result
             const { type, status, result } = e.data;
 
             // If optimal, update the global state and update the UI
             if (type === 'result' && status === 'Optimal') {
                 window.schedState.results = result;
-
                 if (window.updateResultsUI) {
                     window.updateResultsUI();
                 }
-
                 updateStatus("Optimal Roster Found", "optimal");
             } else {
                 // If not 'Optimal', update the status message and scheduling panel error message
@@ -189,7 +187,7 @@ window.ScheduleModule = {
         // Calculate the total number of parameters in the model
         const E = window.schedState.employees.length; // Number of employees
         const S = this.skillNames.length; // Number of skill levels (1-5)
-        const T = 77; // Number of hours in a week
+        const T = 77; // Number of operational hours in a week
         const D = 7; // Number of days in a week
 
         // Binary decision variables
@@ -395,7 +393,7 @@ window.ScheduleModule = {
         if (rosterEntry) {
             rosterEntry.schedule.forEach(role => { if (role) schedHrs++; });
         }
-        const otHrs = Math.max(0, schedHrs - 40);
+        const otHrs = Math.max(0, schedHrs - emp.maxHrs);
 
         const profileCard = document.querySelector('#employees-panel .detail-card:first-child');
         if (profileCard) {
@@ -440,66 +438,121 @@ window.ScheduleModule = {
         this.renderIndividualGantt(emp);
     },
 
-    /**Generates training recommendations for an individual employee based on
-     * system scarity and employee availability.
-     * The function first retrieves the necessary global state (results, demands,
-     * employees), then loops through all hours in the week and identifies which hours 
-     * the employee is available and which hours have a labor demand (hourDem).
-     * For each hourDem, it checks which skills are in demand and which skills
-     * the employee has. If there's a skills imbalance, it saves the relevant
-     * information (skill, day, hour, buffer) in the gaps array.
-     * After the loop, the function sorts the gaps array by buffer (how critical
-     * the shortage is) and selects the top 3 skills with the highest buffer
-     * values. It then generates an HTML string describing each recommendation and 
-     * the associated skill, day, and buffer value.
-     * @param {Object} emp - The employee object to generate recommendations for.
+    /**Generates training recommendations based on the active Roster.
+     * PRIORITIES:
+     * 1. CONTIGUITY GAPS (Highest): Employee has a split shift (Work -> Off -> Work).
+     * 2. CRITICAL COVERAGE: The store is understaffed, and this employee is available.
+     * 3. FLEXIBILITY: Employee is already working but could learn a new skill for that hour.
      */
     generateRecommendations(emp) {
         const recContainer = document.getElementById('trainingRecs');
         if (!recContainer) return;
 
-        const results = window.schedState.results, demands = window.schedState.demands, allEmps = window.schedState.employees;
-        if (!results) {
+        const results = window.schedState.results;
+        const demands = window.schedState.demands;
+
+        if (!results || !results.roster) {
             recContainer.innerHTML = `<p style="font-size:0.8rem; color:#888; font-style:italic;">Solve roster to generate recommendations.</p>`;
             return;
         }
 
-        let gaps = []; // Array to save skills shortage information
-        for (let t = 0; t < 168; t++) { // Loop through all hours in the week
-            const d = Math.floor(t / 24), h = t % 24; // Calculate the day and hour
-            if (!emp.availability[d].includes(h)) continue; // If the employee is not available, skip to the next hour
-
-            const hourDem = demands.find(dem => dem.day === d && dem.hour === h); // Check which hour has a labor demand
-            if (!hourDem) continue; // If there's no labor demand, skip to the next hour
-
-            // For each skill in the hourDem, check if the employee has the skill.
-            // If the employee is missing a skill, save the relevant information in the gaps array.
-            this.skillNames.forEach(skill => {
-                const req = hourDem[skill] || 0;
-                if (req === 0 || emp.skills.includes(skill)) return;
-
-                const qualAvail = allEmps.filter(e => e.skills.includes(skill) && e.availability[d].includes(h)).length;
-                gaps.push({ skill, day: d, hour: h, buffer: qualAvail - req });
-            });
+        const rosterEntry = results.roster.find(r => r.id === emp.id);
+        if (!rosterEntry) {
+            recContainer.innerHTML = `<p style="font-size:0.8rem; color:#888;">Employee not selected for this schedule.</p>`;
+            return;
         }
 
-        // Sort the gaps array by buffer (how critical the shortage is) and select the top 3 skills with the highest buffer values.
-        const topRecs = gaps.sort((a, b) => a.buffer - b.buffer).slice(0, 3);
+        let gaps = [];
         const color = d3.scaleOrdinal().domain(this.skillNames).range(d3.schemeCategory10);
 
-        let html = `<h4 style="margin:0 0 10px 0; font-size:0.85rem; color:var(--secondary);">Optimization Opportunities</h4>`;
-        if (topRecs.length === 0) { // If no recommendations found, display a message
-            html += `<p style="font-size:0.75rem; color:#666;">This employee's current skill set is fully optimized for their availability.</p>`;
+        // Iterate by Day to find Start/End times
+        for (let d = 0; d < 7; d++) {
+            // Find start and end hours for this day
+            let startH = -1, endH = -1;
+            for (let h = 0; h < 24; h++) {
+                if (rosterEntry.schedule[d * 24 + h] !== null) {
+                    if (startH === -1) startH = h;
+                    endH = h;
+                }
+            }
+
+            // If no shift today, skip
+            if (startH === -1) continue;
+
+            // Now scan ONLY between startH and endH for gaps
+            for (let h = startH; h <= endH; h++) {
+                const t = d * 24 + h;
+                const isGap = (rosterEntry.schedule[t] === null);
+
+                // Also check availability/demand for this specific hour
+                if (!emp.availability[d].includes(h)) continue;
+                const hourDem = demands.find(dem => dem.day === d && dem.hour === h);
+                if (!hourDem) continue;
+
+                this.skillNames.forEach(skill => {
+                    const req = hourDem[skill] || 0;
+                    if (req === 0) return;
+                    if (emp.skills.includes(skill)) return;
+
+                    // Calculate Net Coverage
+                    const scheduledCount = results.roster.filter(e => e.schedule[t] === skill).length;
+                    const buffer = scheduledCount - req;
+
+                    // SCORING LOGIC
+                    let type = '';
+                    let score = 0;
+
+                    // PRIORITY 1: INTERNAL GAP (Split Shift Fix)
+                    if (isGap) {
+                        type = 'BRIDGE';
+                        score = 10000 - buffer; // Massive priority
+                    }
+                    // PRIORITY 2: CRITICAL COVERAGE (If not a gap, but store needs help)
+                    else if (buffer < 0) {
+                        type = 'CRITICAL';
+                        score = 1000 - buffer;
+                    }
+                    // PRIORITY 3: FLEXIBILITY (Already working)
+                    else if (rosterEntry.schedule[t] !== null && buffer < 1) {
+                        type = 'FLEX';
+                        score = 10 - buffer;
+                    }
+
+                    if (type) {
+                        gaps.push({ skill, day: d, hour: h, buffer, type, score });
+                    }
+                });
+            }
+        }
+
+        // Sort by Score and take top 3
+        const topRecs = gaps.sort((a, b) => b.score - a.score).slice(0, 3);
+
+        let html = `<h4 style="margin:0 0 10px 0; font-size:0.85rem; color:var(--secondary);">Training Opportunities</h4>`;
+
+        if (topRecs.length === 0) {
+            html += `<p style="font-size:0.75rem; color:#666;">No internal gaps or high-priority training needs found.</p>`;
         } else {
-            topRecs.forEach(r => { // For each recommendation, generate an HTML string recommending new skills to help smooth scheduling.
+            topRecs.forEach(r => {
+                let badgeColor = "#2980b9"; // Blue (Flex)
+                let label = "Flexibility";
+
+                if (r.type === 'BRIDGE') { badgeColor = "#8e44ad"; label = "Fill Internal Gap"; }
+                else if (r.type === 'CRITICAL') { badgeColor = "#e74c3c"; label = "Coverage Gap"; }
+
                 html += `
                 <div style="margin-bottom:8px; font-size:0.75rem; border-left:3px solid ${color(r.skill)}; padding-left:8px;">
-                    Learn <span style="color:${color(r.skill)}; font-weight:bold;">${r.skill}</span> to cover
-                    ${days[r.day]} at ${r.hour}:00 - (Current Buffer: ${r.buffer})
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-weight:bold; color:${color(r.skill)};">${r.skill}</span>
+                        <span style="font-size:0.6rem; background:${badgeColor}; color:#fff; padding:1px 4px; border-radius:3px; text-transform:uppercase;">${label}</span>
+                    </div>
+                    <div style="color:#555; margin-top:2px;">
+                        ${days[r.day]} @ ${r.hour}:00
+                    </div>
                 </div>`;
             });
         }
-        recContainer.innerHTML = html; // Render the HTML in the container
+        recContainer.innerHTML = html;
     },
 
     /**
@@ -547,8 +600,8 @@ window.ScheduleModule = {
                 demands: JSON.parse(JSON.stringify(window.schedState.demands))
             };
 
-            // Instantiate and Run Optimizer with 2 workers for parallel search steps
-            const optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 2);
+            // Instantiate and Run Optimizer with 3 workers for parallel search steps
+            const optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 3);
             const bestResult = await optimizer.findOptimalHeadcount(params);
 
             // Apply Results
@@ -735,10 +788,8 @@ window.ScheduleModule = {
                     // Lookup Demand and Supply metrics
                     const demandData = window.schedState.demands.find(d => d.day === dayIdx && d.hour === currentHour);
                     const demandVal = demandData ? (demandData[role] || 0) : 0;
-                    const supplyVal = window.schedState.employees.filter(e =>
-                        e.skills.includes(role) && e.availability[dayIdx].includes(currentHour)
-                    ).length;
-
+                    const supplyVal = window.schedState.results.roster.filter(e =>
+                        e.schedule[dayIdx * 24 + currentHour] === role).length;
                     svg.append("rect")
                         .attr("x", xScale(h) - 5).attr("y", y + 12)
                         .attr("width", Math.max(0, (width / hoursCount) - 0.5)) // Robust width calculation
@@ -770,37 +821,64 @@ window.ScheduleModule = {
      * It also generates a list of the top 10 training opportunities and displays them on the UI.
      */
     render7DayStats() {
-        // Get the necessary global state variables
-        const res = window.schedState.results, dems = window.schedState.demands, emps = window.schedState.employees;
-        // Initialize variables arrays
+        const res = window.schedState.results;
+        const dems = window.schedState.demands;
+        const allEmps = window.schedState.employees;
+
+        if (!res || !res.roster) return;
+
+        // --- STEP 1: IDENTIFY THE ACTIVE WORKFORCE ---
+        // The solver returns all employees, but unselected ones have null schedules.
+        // We create a Set of IDs for employees who are actually working at least 1 hour.
+        const activeIds = new Set(
+            res.roster
+                .filter(r => r.schedule.some(slot => slot !== null))
+                .map(r => r.id)
+        );
+
+        // --- STEP 2: CREATE THE ACTIVE POOL ---
+        // We filter the master employee list (which has the raw availability/skills data)
+        // to only include those IDs found above.
+        const activePool = allEmps.filter(e => activeIds.has(e.id));
+
+        // Initialize Stats
         let dailyOverageHrs = Array(7).fill(0);
         let opportunities = [];
 
-        // Loop through all hours in the week and calculate the supply and demand
+        // --- STEP 3: ANALYZE HOUR-BY-HOUR ---
         for (let t = 0; t < 168; t++) {
-            const d = Math.floor(t / 24), h = t % 24; // Calculate the day and hour of the current time step
-            const hourDem = dems.find(dem => dem.day === d && dem.hour === h); // Get the hour demand for the current time step
-            const totalReq = this.skillNames.reduce((sum, s) => sum + (hourDem ? hourDem[s] : 0), 0); // Calculate the total requirements for the current time step
-            const supplyAtT = res.roster.filter(emp => emp.schedule[t] !== null).length; // Calculate the supply at the current time step
-            // If the supply is greater than the total requirements, add the overage to the dailyOverageHrs array
+            const d = Math.floor(t / 24), h = t % 24;
+            const hourDem = dems.find(dem => dem.day === d && dem.hour === h);
+
+            // Calculate Daily Overages (Supply > Demand)
+            const totalReq = this.skillNames.reduce((sum, s) => sum + (hourDem ? hourDem[s] : 0), 0);
+            const supplyAtT = res.roster.filter(emp => emp.schedule[t] !== null).length;
             if (supplyAtT > totalReq) dailyOverageHrs[d] += (supplyAtT - totalReq);
 
-            // Loop through all skills and calculate the opportunities for the current time step
+            // Calculate Scarcity (Buffer)
             this.skillNames.forEach(skill => {
-                // Get the requirement for the current skill at the current time step
                 const req = hourDem ? hourDem[skill] : 0;
-                // If the requirement is 0, skip to the next skill
                 if (req === 0) return;
-                // Calculate the availability for the current skill at the current time step
-                const qualAvailable = emps.filter(emp => emp.skills.includes(skill) && emp.availability[d].includes(h)).length;
-                // Add the current opportunity to the opportunities array
+
+                // --- KEY FIX IS HERE ---
+                // "qualAvailable" now checks ONLY the 'activePool'.
+                // Even if we have 50 people on the bench who know "Cashier", 
+                // if they aren't on the schedule, they don't count towards the buffer.
+                const qualAvailable = activePool.filter(emp =>
+                    emp.skills.includes(skill) && emp.availability[d].includes(h)
+                ).length;
+
+                // Buffer = (People on the team who CAN do this) - (People we NEED)
+                // A negative buffer means even if we moved everyone on the active team around,
+                // we still wouldn't have enough coverage.
                 opportunities.push({ skill, day: d, hour: h, buffer: qualAvailable - req, req });
             });
         }
 
-        // Calculate the average wage of all employees
-        const avgWage = emps.length ? (emps.reduce((sum, e) => sum + (parseFloat(e.pay) || 0), 0) / emps.length).toFixed(2) : "0.00";
-        // Display the 7-day stats on the UI
+        // --- STEP 4: RENDER UI ---
+        // Calculate Avg Wage based only on Active Employees
+        const avgWage = activePool.length ? (activePool.reduce((sum, e) => sum + (parseFloat(e.pay) || 0), 0) / activePool.length).toFixed(2) : "0.00";
+
         document.getElementById('weeklySlackBreakdown').innerHTML = `<div class="stats-grid">` +
             dailyOverageHrs.map((hrs, i) => `
             <div class="stats-card">
@@ -818,11 +896,9 @@ window.ScheduleModule = {
             </div>
         </div></div>`;
 
-        // Sort the opportunities array by buffer (lowest to highest) and get the top 10
         const top10 = opportunities.sort((a, b) => a.buffer - b.buffer).slice(0, 10);
-        // Display the top 10 training opportunities on the UI
         document.getElementById('trainingOpportunities').innerHTML = top10.map(op => {
-            const isCrit = op.buffer <= 1;
+            const isCrit = op.buffer < 0; // Negative buffer = Genuine Shortage in active team
             return `<div class="opportunity-card ${isCrit ? 'critical' : ''}">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <strong style="font-size:0.85rem;">${op.skill}</strong>
