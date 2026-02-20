@@ -104,7 +104,7 @@ async function solvePortfolio(params) {
     /**============================================================================
      * OBJECTIVE FUNCTION (Z)
      * ============================================================================
-     * Equation: Maximize Z = c_T + Σ (h_i,T * P_i,T * sellFactor)
+     * Equation: Maximize Z = c_T + Σ (h_i,T * P_i,T)
      * Goal: Maximize the final "Settled Liquid Wealth" on the terminal day.
      * The solver treats terminal holdings as cash minus the sellFactor friction.
      * This prevents holding "worthless" stock just to satisfy inventory constraints.
