@@ -41,6 +41,28 @@ window.ScheduleModule = {
         window.selectEmployee = (id) => this.selectEmployee(id);
     },
 
+    /**
+     * Instantly terminates any active background solving processes, 
+     * whether they are single manual solves or parallel optimal searches.
+     */
+    abortActiveOptimization() {
+        // Kill single manual worker
+        if (window.currentWorker) {
+            window.currentWorker.terminate();
+            window.currentWorker = null;
+        }
+        // Kill parallel optimizer pool
+        if (this.optimizer) {
+            this.optimizer.terminate();
+            this.optimizer = null;
+        }
+        // Stop the countdown timer
+        if (this.tickerInterval) {
+            clearInterval(this.tickerInterval);
+            this.tickerInterval = null;
+        }
+    },
+
     /**Coordinates chart rendering and sidebar visibility based on the active sub-tab.
      * This function is triggered when a user switches between sub-tabs in the scheduling module.
      * It adjusts the display of the employee list and renders the appropriate chart based on the
@@ -90,13 +112,18 @@ window.ScheduleModule = {
      */
     requestSolve() {
         if (!window.schedState.employees.length) return;
+        // Instantly kill any running single or parallel searches & clear old timers
+        this.abortActiveOptimization();
+
         // Reset KPI Scorecard
         if (window.resetGlobalKPI) window.resetGlobalKPI();
+
         // Restart the global solver countdown, and render the solver dashboard
         const totalEmps = window.schedState.employees.length;
         const inputVal = document.getElementById('employeeCount')?.value;
-        window.schedState.solverTimeLeft = ((parseInt(inputVal) || totalEmps) < totalEmps) ? 360 : 300;
-        this.startGlobalTicker();
+        window.schedState.solverTimeLeft = ((parseInt(inputVal) || totalEmps) < totalEmps) ? 300 : 300;
+
+        this.startGlobalTicker(); // Timer is safely started AFTER the kill switch
         this.renderSolverDashboard();
 
         // Prepare the parameters for the worker
@@ -110,7 +137,6 @@ window.ScheduleModule = {
         };
 
         // Create a new Worker Instance
-        if (window.currentWorker) window.currentWorker.terminate();
         window.currentWorker = new Worker('scripts/scheduleWorker.js');
 
         // Define the handler for the worker messages
@@ -191,11 +217,13 @@ window.ScheduleModule = {
         const D = 7; // Number of days in a week
 
         // Binary decision variables
-        const binaryVars = (E * T); // Total number of binary decision variables
+        const binaryVars = (E * T) + E; // Total number of binary decision variables
         // Continuous decision variables = Assignments + Shift Bounds + Demand Slack
-        const continuousVars = (E * T * S) + (E * D * 3) + (E * 4) + (T * S); // Total number of continuous decision variables
+        const continuousVars = (E * T * S) + (E * D * 3) + (E * 3); // Total number of continuous decision variables
+        // Total Explicity Variable Bounds
+        const totalBounds = continuousVars + (E * D) + (E * T * S);
         // Total constraints = Demand Satisfaction + Skill Linking and Bounds + Daily Shift Logic + Balancing Capacity and Global Links
-        const totalConstraints = (E * T * 4) + (E * D * 6) + (E * T * S * 1) + + (E * S) + (E * 4) + (T * S) + 1; // Total number of constraints
+        const totalConstraints = (E * T * 4) + (E * D * 7) + (E * T * S * 1) + (E * 5) + (T * S) + 1 + totalBounds; // Total number of constraints
 
         // Calculate the time left in minutes and seconds
         const mins = Math.floor(window.schedState.solverTimeLeft / 60);
@@ -568,16 +596,10 @@ window.ScheduleModule = {
 
         // Resetting the GUI and disabling the button while the search is running
         btn.disabled = true;
-        btn.textContent = "Running Optimization..."; {
-            if (window.currentWorker) {
-                window.currentWorker.terminate();
-                window.currentWorker = null;
-                if (this.tickerInterval) {
-                    clearInterval(this.tickerInterval);
-                    this.tickerInterval = null;
-                }
-            }
-        }
+        btn.textContent = "Running Optimization...";
+
+        // Instantly kill any running single or parallel searches
+        this.abortActiveOptimization();
         if (statusContainer) {
             statusContainer.innerHTML = `
                 <div class="solver-dashboard">
@@ -587,8 +609,11 @@ window.ScheduleModule = {
                         <div class="loading-spinner"></div>
                     </div>
                     <div class="metrics-grid">
-                        <p>One Worker is performing a Golden Search, while the other Worker is using an opposing Bisection Search to Aggressively Prune the Search Space--reducing search time by almost 40%<br>Iterations may be tracked using the Browser's Developer Tools.</p>
-                        <p>This search may take up to an hour, Please wait...</p>
+                        <p>This optimizer dynamically allocates 3 worker threads in parallel search.<br>
+                        Active threads calculate Golden Search pivots to narrow the search space, while idle threads pre-calculate speculative midpoints.<br>
+                        This then uses trinary logic to aggressively prune the search space, converging on an ideal solution quickly.</p>
+                        <p> Iterations may be tracked using the Browser's Development Tools.<br>
+                        This search will take approximately 15 minutes, Please wait...</p>
                     </div>
                 </div>`;
         }
@@ -601,8 +626,8 @@ window.ScheduleModule = {
             };
 
             // Instantiate and Run Optimizer with 3 workers for parallel search steps
-            const optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 3);
-            const bestResult = await optimizer.findOptimalHeadcount(params);
+            this.optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 3);
+            const bestResult = await this.optimizer.findOptimalHeadcount(params);
 
             // Apply Results
             if (bestResult) {

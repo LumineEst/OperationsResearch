@@ -24,7 +24,7 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
      * @param {string} workerScriptPath - Path to the worker file (e.g. 'scripts/scheduleWorker.js')
      * @param {number} numWorkers - Number of parallel threads (Default: 2)
      */
-    constructor(workerScriptPath, numWorkers = 3) {
+    constructor(workerScriptPath, numWorkers = 2) {
         this.workerPath = workerScriptPath;
         this.poolSize = numWorkers;
         this.workers = []; // Array of Worker objects
@@ -63,16 +63,24 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
      * @param {function} onProgress - Callback for UI updates
      * @returns {Promise<object>} - Resolves with the cost and full result object
      */
+    /**
+     * Helper: Dispatch a solve task to a specific worker index.
+     * Wraps the Worker 'onmessage' event in a Promise for async/await usage.
+     */
     runWorker(workerIdx, params, n, onProgress) {
         return new Promise((resolve) => {
             const w = this.workers[workerIdx];
+
             const handleMsg = (e) => {
                 const { type, result, status } = e.data;
-                // Only listen for the final result
+
+                // Handle Successful or Gracefully Infeasible Runs
                 if (type === 'result') {
-                    w.removeEventListener('message', handleMsg);
-                    let cost = Infinity;
+                    cleanup();
+                    // Directional Penalty: Pushes search toward higher/easier headcounts
+                    let cost = 99999999 - n;
                     let safeResult = null;
+
                     if (status === 'Optimal' && result && result.actualLaborCost) {
                         const parsedCost = parseFloat(result.actualLaborCost);
                         if (!isNaN(parsedCost) && parsedCost > 1.0) {
@@ -80,26 +88,54 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
                             safeResult = result;
                         }
                     }
-
-                    const data = {
-                        headcount: n,
-                        cost: cost,
-                        result: safeResult
-                    };
-
-                    // Cache the result immediately
-                    this.cache.set(n, data);
-
-                    // Fire UI callback if provided
-                    if (onProgress) onProgress(data);
-
-                    resolve(data);
+                    resolveTask(cost, safeResult);
+                }
+                // Handle WASM Aborts Caught by the Worker
+                else if (type === 'crash') {
+                    handleCrash(`WASM Abort for headcount ${n}`);
                 }
             };
 
-            w.addEventListener('message', handleMsg);
+            // Catch Unhandled Exceptions that Bubble up to the Worker Object
+            const handleError = (err) => {
+                err.preventDefault(); // Prevent browser console spam
+                handleCrash(`Global Worker Error for headcount ${n}`);
+            };
 
-            // Send the task to the worker
+            // Master Crash Handler: Reboots the thread and assigns penalty
+            const handleCrash = (reason) => {
+                console.warn(`>> Worker ${workerIdx} crashed: ${reason}. Rebooting thread and assigning penalty.`);
+                cleanup();
+
+                // Terminate the corrupted worker thread
+                this.workers[workerIdx].terminate();
+
+                // Spin up a fresh worker in the exact same pool slot
+                this.workers[workerIdx] = new Worker(this.workerPath);
+
+                // Resolve with the penalty so the search seamlessly continues
+                resolveTask(99999999 - n, null);
+            };
+
+            // Helper to prevent memory leaks from stacking event listeners
+            const cleanup = () => {
+                w.removeEventListener('message', handleMsg);
+                w.removeEventListener('error', handleError);
+            };
+
+            // Helper to cache and finalize
+            const resolveTask = (cost, safeResult) => {
+                const data = { headcount: n, cost: cost, result: safeResult };
+                this.cache.set(n, data);
+                if (onProgress) onProgress(data);
+                resolve(data);
+            };
+
+            // Attach listeners
+            w.addEventListener('message', handleMsg);
+            w.addEventListener('error', handleError);
+
+            // Dispatch task
             w.postMessage({
                 type: 'solve',
                 data: { ...params, preferredEmployees: n },
@@ -127,18 +163,33 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
         const skills = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
         params.demands.forEach(d => skills.forEach(s => totalDemand += parseFloat(d[s] || 0)));
 
-        // Calculate Average Employee Capacity Hours
-        let sumMaxHrs = 0;
-        const validEmps = params.employees.length > 0 ? params.employees.length : 1;
-        params.employees.forEach(e => {
-            sumMaxHrs += (parseFloat(e.maxHours) || 40);
-        });
-        const avgMaxHrs = sumMaxHrs / validEmps;
+        // Extract employee max hours, defaulting to 40, and sort from highest to lowest
+        const sortedMaxHours = params.employees
+            .map(e => parseFloat(e.maxHours) || parseFloat(e.maxHrs) || 40)
+            .sort((valA, valB) => valB - valA);
 
-        // Conservative Bounds: 
-        // Lower: ~Avg Max Hours w/o (High utilization)
-        // Upper: ~25 hrs/emp (Low utilization)
-        let a = Math.floor(3 * totalDemand / (1.75 * avgMaxHrs + 40)); // Lower Bound
+        // Calculate the theoretical minimum employees needed (Lower Bound 'a')
+        let accumulatedHours = 0;
+        let theoreticalMinEmployees = 0;
+        const AVAILABILITY_RATE = 0.90; // a yield rate based on PTO/Call-Out Rates
+
+        for (let i = 0; i < sortedMaxHours.length; i++) {
+            accumulatedHours += (sortedMaxHours[i] * AVAILABILITY_RATE);
+            theoreticalMinEmployees++;
+
+            // Stop once our cumulative 90% capacity exceeds the total demand
+            if (accumulatedHours >= totalDemand) {
+                break;
+            }
+        }
+
+        // If demand exceeds total theoretical supply, default to the full roster
+        if (accumulatedHours < totalDemand) {
+            theoreticalMinEmployees = sortedMaxHours.length;
+        }
+
+        // Conservative Bounds:
+        let a = theoreticalMinEmployees; // New Lower Bound
         let b = Math.ceil(totalDemand / 25); // Upper Bound
 
         console.log(`%c--- STARTING HEDGED GSS [${a}, ${b}] ---`, "color: #e74c3c; font-weight: bold;");
@@ -172,25 +223,23 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
             // the Golden Section of [c, b]
             let specR = Math.round(c + (b - c) * (PHI - 1));
 
-            // --- SPECULATIVE "HEDGE" (Bisection) ---
-            // If we have a free worker (i.e., one pivot was already cached from previous step),
-            // we use the spare capacity to check the Midpoint or speculative golden sections.
-            if (tasks.length < this.poolSize) {
-                // Try Midpoint
-                if (m > c && m < d && !this.cache.has(m)) {
-                    console.log(` >> Free Worker. Hedging with Gap Fill: ${m}`);
-                    tasks.push(m);
-                }
-                else {
-                    // Add whichever residual Golden Section is valid and unknown
-                    if (specL > a && specL < d && !this.cache.has(specL) && !tasks.includes(specL)) {
-                        console.log(` >> Free Worker. Speculating Left (Next-Gen): ${specL}`);
-                        tasks.push(specL);
-                    }
-                    else if (specR > c && specR < b && !this.cache.has(specR) && !tasks.includes(specR)) {
-                        console.log(` >> Free Worker. Speculating Right (Next-Gen): ${specR}`);
-                        tasks.push(specR);
-                    }
+            // --- SPECULATIVE "HEDGE" (Bisection & Next-Gen GSS) ---
+            // If we have free workers (because a mandatory pivot was already cached),
+            // fill the remaining slots with speculative points in order of priority.
+
+            // Priority 1: Midpoint (Allows for massive 50% bracket shrinks)
+            // Priority 2: Speculative Left (Pre-computes the next GSS step if the peak is left)
+            // Priority 3: Speculative Right (Pre-computes the next GSS step if the peak is right)
+            const speculativeCandidates = [m, specL, specR];
+
+            for (const specPoint of speculativeCandidates) {
+                // Stop adding tasks once our worker pool is completely full
+                if (tasks.length >= this.poolSize) break;
+
+                // Ensure the point is strictly inside bounds, not already queued, and not cached
+                if (specPoint > a && specPoint < b && !tasks.includes(specPoint) && !this.cache.has(specPoint)) {
+                    console.log(` >> Free Worker. Hedging with point: ${specPoint}`);
+                    tasks.push(specPoint);
                 }
             }
 
@@ -261,12 +310,16 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
         const candidates = [];
         for (let i = a; i <= b; i++) candidates.push(i);
 
-        // Solve any stragglers in the final bracket
+        // Solve any stragglers in the final bracket in strict batches
         const unknowns = candidates.filter(n => !this.cache.has(n));
         if (unknowns.length > 0) {
-            await Promise.all(unknowns.map((n, idx) =>
-                this.runWorker(idx % this.poolSize, params, n, onProgress)
-            ));
+            // Process unknowns in chunks equal to poolSize
+            for (let i = 0; i < unknowns.length; i += this.poolSize) {
+                const batch = unknowns.slice(i, i + this.poolSize);
+                await Promise.all(batch.map((n, idx) =>
+                    this.runWorker(idx, params, n, onProgress)
+                ));
+            }
         }
 
         // --------------------------------------------------------------------

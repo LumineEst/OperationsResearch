@@ -201,6 +201,9 @@ function setupGlobalNavigation() {
     document.getElementById('topNav')?.addEventListener('click', (e) => {
         const btn = e.target.closest('.top-tab-btn');
         if (!btn || btn.classList.contains('active')) return;
+        if (window.ScheduleModule && window.ScheduleModule.abortActiveOptimization) {
+            window.ScheduleModule.abortActiveOptimization();
+        }
         resetGlobalKPI(); // Reset global KPI label
 
         // Remove 'active' class from all buttons and panels
@@ -216,6 +219,7 @@ function setupGlobalNavigation() {
             if (module === 'inventory') label.textContent = "Total Profit";
             else if (module === 'stocks') label.textContent = "Portfolio Value";
             else if (module === 'scheduling') label.textContent = "Labor Cost";
+            else if (module === 'ordering') label.textContent = "Weekly Profit";
         }
 
         loadModuleData(module); // Load module data
@@ -294,6 +298,7 @@ function setupGlobalNavigation() {
             if (activeTab === 'inventory') window.InventoryModule.processWorkbook(workbook);
             else if (activeTab === 'stocks') window.StocksModule.processWorkbook(workbook);
             else if (activeTab === 'scheduling') window.ScheduleModule.processWorkbook(workbook);
+            else if (activeTab === 'ordering') window.OrdersModule.processWorkbook(workbook);
         };
         reader.readAsArrayBuffer(file);
     });
@@ -316,6 +321,10 @@ function setupGlobalNavigation() {
         } else if (activeTab === 'scheduling') {
             if (window.ScheduleModule && window.ScheduleModule.exportResults) {
                 window.ScheduleModule.exportResults();
+            }
+        } else if (activeTab === 'ordering') {
+            if (window.OrdersModule && window.OrdersModule.exportResults) {
+                window.OrdersModule.exportResults();
             }
         } else {
             console.warn("No active module found for export.");
@@ -366,4 +375,5 @@ window.addEventListener('resize', () => {
     if (activeTab === 'inventory') window.InventoryModule.drawCharts();
     else if (activeTab === 'stocks') window.StocksModule.drawCharts();
     else if (activeTab === 'scheduling') window.ScheduleModule.drawCharts();
+    else if (activeTab === 'ordering') window.OrdersModule.drawCharts();
 });

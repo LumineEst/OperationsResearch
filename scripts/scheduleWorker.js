@@ -26,14 +26,14 @@ let highsModule = null;
 
 /** Initialize Highs Module:
  * Attempts to load the WebAssembly solver from libs/highs.js
- * 512MB is allocated as a safe compatibility buffer.
+ * 1GB is allocated as a safe compatibility buffer.
  */
 try {
     importScripts('../libs/highs.js');
     if (typeof Module === 'function') {
         highsModulePromise = Module({
             locateFile: (file) => '../libs/' + file,
-            initialMemory: 512 * 1024 * 1024,
+            initialMemory: 1024 * 1024 * 1024,
         }).then(instance => {
             highsModule = instance;
             return instance;
@@ -180,8 +180,8 @@ async function solveSchedulingMILP(params) {
     const isFullRoster = preferredCount === employees.length;
 
     // Time Limits
-    const SINGLE_PASS_LIMIT = 240; // Time for Full Roster
-    const DOUBLE_PASS_LIMIT = 180; // Time for Partial Roster (1 of 2 Passes)
+    const SINGLE_PASS_LIMIT = 300; // Time for Full Roster
+    const DOUBLE_PASS_LIMIT = 150; // Time for Partial Roster (1 of 2 Passes)
 
     // Pass Initialization Message to Console
     console.log(`%c>> SOLVER START: Target ${preferredCount} (Total Pool: ${employees.length})`, "color: green; font-weight: bold;");
@@ -244,9 +244,11 @@ async function solveSchedulingMILP(params) {
             // Objective Penalty Weights
             const CONTIGUITY_PENALTY = baseWage * 10.0;
             const MIN_HOUR_PENALTY = baseWage * 50.0;
+            const symmetryBreak = (eIdx / employees.length) * 0.001;
+            const effectiveWage = baseWage - symmetryBreak;
 
-            objTerms.push(`${fmt(baseWage)} reg_${eIdx}`);
-            objTerms.push(`${fmt(baseWage * 1.5)} ot_${eIdx}`);
+            objTerms.push(`${fmt(effectiveWage)} reg_${eIdx}`);
+            objTerms.push(`${fmt(effectiveWage * 1.5)} ot_${eIdx}`);
             objTerms.push(`${fmt(MIN_HOUR_PENALTY)} s_min_${eIdx}`);
 
             for (let d = 0; d < 7; d++) {
@@ -563,7 +565,13 @@ async function solveSchedulingMILP(params) {
 self.onmessage = async function (e) {
     const { type, data } = e.data;
     if (type === 'solve') {
-        const output = await solveSchedulingMILP(data);
-        self.postMessage({ type: 'result', ...output });
+        try {
+            const output = await solveSchedulingMILP(data);
+            self.postMessage({ type: 'result', ...output });
+        } catch (error) {
+            // Catch fatal WASM aborts and notify the main thread
+            console.error("Worker Caught Fatal Error:", error);
+            self.postMessage({ type: 'crash', error: error.toString() });
+        }
     }
 }
