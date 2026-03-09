@@ -609,7 +609,7 @@ window.ScheduleModule = {
                         <div class="loading-spinner"></div>
                     </div>
                     <div class="metrics-grid">
-                        <p>This optimizer dynamically allocates 3 worker threads in parallel search.<br>
+                        <p>This optimizer dynamically allocates 2 worker threads in parallel search.<br>
                         Active threads calculate Golden Search pivots to narrow the search space, while idle threads pre-calculate speculative midpoints.<br>
                         This then uses trinary logic to aggressively prune the search space, converging on an ideal solution quickly.</p>
                         <p> Iterations may be tracked using the Browser's Development Tools.<br>
@@ -625,8 +625,8 @@ window.ScheduleModule = {
                 demands: JSON.parse(JSON.stringify(window.schedState.demands))
             };
 
-            // Instantiate and Run Optimizer with 3 workers for parallel search steps
-            this.optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 3);
+            // Instantiate and Run Optimizer with 2 workers for parallel search steps
+            this.optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 2);
             const bestResult = await this.optimizer.findOptimalHeadcount(params);
 
             // Apply Results

@@ -72,8 +72,10 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
             const w = this.workers[workerIdx];
 
             const handleMsg = (e) => {
-                const { type, result, status } = e.data;
-
+                const type = e.data.type;
+                const payload = e.data.data || e.data;
+                const status = payload.status
+                const result = payload.result
                 // Handle Successful or Gracefully Infeasible Runs
                 if (type === 'result') {
                     cleanup();
@@ -190,7 +192,7 @@ window.WorkforceOptimizer = class WorkforceOptimizer {
 
         // Conservative Bounds:
         let a = theoreticalMinEmployees; // New Lower Bound
-        let b = Math.ceil(totalDemand / 25); // Upper Bound
+        let b = Math.ceil(totalDemand / 30); // Upper Bound
 
         console.log(`%c--- STARTING HEDGED GSS [${a}, ${b}] ---`, "color: #e74c3c; font-weight: bold;");
 
