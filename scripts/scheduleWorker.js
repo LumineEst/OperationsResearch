@@ -12,9 +12,7 @@
  * Blocking is incentivized within the objective function, and not as a direct
  * constraint; which means that tighter schedules may result in a loosening of
  * the blocking behavior to meet constraints.  A smoothing Heuristic is used to
- * reallocate skill assignments to balance overstaffing of skill-groups.  This
- * is then repassed through the solver a second time with feasibility weights
- * helping to get a solution that is more optimal than the original pass.
+ * reallocate skill assignments to balance overstaffing of skill-groups.
  * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
  * HiGHs Controls: https://dev.ampl.com/solvers/highs/options.html
  * * @author Joel Wood
@@ -53,146 +51,146 @@ function fmt(num) {
 }
 
 /**
- * ============================================================================
- * TWO-PASS SKILL SMOOTHING HEURISTIC
- * ============================================================================
- * Converts the solver's unbalanced skill allocations into a clean, 
- * contiguous integer schedule using an Inertia-Weighted Forward Pass and a 
- * Swap-Correcting Backward Pass.
- */
+ * ============================================================================
+ * TWO-PASS SKILL SMOOTHING HEURISTIC
+ * ============================================================================
+ * Converts the solver's unbalanced skill allocations into a clean, 
+ * contiguous integer schedule using an Inertia-Weighted Forward Pass and a 
+ * Swap-Correcting Backward Pass.
+ */
 function smoothSkillAllocation(rawRoster, demands, skillNames) {
-    // Map active workers per hour
-    const sched = Array.from({ length: 168 }, () => ({})); // hour -> empIdx -> skillIdx
-    const activeAtHour = Array.from({ length: 168 }, () => []);
-    rawRoster.forEach((emp, eIdx) => {
-        for (let t = 0; t < 168; t++) {
-            if (emp.schedule[t] !== null) { 
-                activeAtHour[t].push(eIdx);
-            }
-        }
-    });
+    // Map active workers per hour
+    const sched = Array.from({ length: 168 }, () => ({})); // hour -> empIdx -> skillIdx
+    const activeAtHour = Array.from({ length: 168 }, () => []);
+    rawRoster.forEach((emp, eIdx) => {
+        for (let t = 0; t < 168; t++) {
+            if (emp.schedule[t] !== null) {
+                activeAtHour[t].push(eIdx);
+            }
+        }
+    });
 
-    const INERTIA_MULTIPLIER = 100.0; // Massive weight to prioritize staying in the same role
-    const DECAY_FACTOR = 0.5; // Exponential decay to spread surplus
+    const INERTIA_MULTIPLIER = 100.0; // Massive weight to prioritize staying in the same role
+    const DECAY_FACTOR = 0.5; // Exponential decay to spread surplus
     let skillScores = new Array(skillNames.length).fill(1.0);
 
-    // ========================================================================
-    // FORWARD PASS (Chronological Inertia & Demand Fulfillment)
-    // ========================================================================
-    for (let t = 0; t < 168; t++) {
-        if (activeAtHour[t].length === 0) continue;
-        let unassigned = [...activeAtHour[t]];
-        let hourDemand = new Array(skillNames.length).fill(0);
-        // Map Hard Demand for Hour 't'
-        const day = Math.floor(t / 24);
-        const hour = t % 24;
-        const demandRow = demands.find(d => parseInt(d.day) === day && parseInt(d.hour) === hour);
-        
-        if (demandRow) {
-            skillNames.forEach((s, sIdx) => {
-                hourDemand[sIdx] = parseFloat(demandRow[s]) || 0;
-            });
-        }
-        // --- Hard Demand Fulfillment ---
-        for (let sIdx = 0; sIdx < skillNames.length; sIdx++) {
-            let needed = hourDemand[sIdx];
-            while (needed > 0 && unassigned.length > 0) {
-                // Sort unassigned pool by INERTIA (Did they do this skill last hour?)
-                unassigned.sort((a, b) => {
-                    const aInertia = (t > 0 && sched[t-1][a] === sIdx) ? 1 : 0;
-                    const bInertia = (t > 0 && sched[t-1][b] === sIdx) ? 1 : 0;
-                    return bInertia - aInertia; // Descending priority
-                });
-                const empIdx = unassigned.find(idx => rawRoster[idx].skills.includes(skillNames[sIdx]));
-                if (empIdx !== undefined) {
-                    sched[t][empIdx] = sIdx;
-                    unassigned = unassigned.filter(id => id !== empIdx); // Remove from pool
-                    needed--;
-                } else {
-                    break;
-                }
-            }
-        }
-        // --- Surplus Allocation (Decay + Inertia) ---
-        unassigned.forEach(empIdx => {
-            const empSkills = (rawRoster[empIdx].skills || [])
-                .map(s => skillNames.indexOf(s))
-                .filter(idx => idx !== -1);
-            if (empSkills.length === 0) return;
-            let bestSkill = empSkills[0];
-            let bestScore = -1;
-            empSkills.forEach(sIdx => {
-                let score = skillScores[sIdx];
-                // Apply Inertia Multiplier if they performed this skill last hour
-                if (t > 0 && sched[t-1][empIdx] === sIdx) {
-                    score *= INERTIA_MULTIPLIER;
-                }
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestSkill = sIdx;
-                }
-            });
-            // Lock assignment and decay the global score for that skill
-            sched[t][empIdx] = bestSkill;
-            skillScores[bestSkill] *= DECAY_FACTOR; 
-        });
-        skillScores = skillScores.map(s => s + 0.1); 
-    }
+    // ========================================================================
+    // FORWARD PASS (Chronological Inertia & Demand Fulfillment)
+    // ========================================================================
+    for (let t = 0; t < 168; t++) {
+        if (activeAtHour[t].length === 0) continue;
+        let unassigned = [...activeAtHour[t]];
+        let hourDemand = new Array(skillNames.length).fill(0);
+        // Map Hard Demand for Hour 't'
+        const day = Math.floor(t / 24);
+        const hour = t % 24;
+        const demandRow = demands.find(d => parseInt(d.day) === day && parseInt(d.hour) === hour);
 
-    // ========================================================================
-    // BACKWARD PASS (Orphan Eradication / Smoothing Swaps)
-    // ========================================================================
-    // Scan backwards from the end of the week down to hour 1
-    for (let t = 166; t >= 1; t--) {
-        const empsAtT = Object.keys(sched[t]).map(Number);
-        // Compare every pair of employees working at hour 't'
-        for (let i = 0; i < empsAtT.length; i++) {
-            for (let j = i + 1; j < empsAtT.length; j++) {
-                const empA = empsAtT[i];
-                const empB = empsAtT[j];
-                const skillA = sched[t][empA];
-                const skillB = sched[t][empB];
-                if (skillA === skillB) continue; // no swap needed
-                // Ensure both employees are physically capable of performing the other's skill
-                const canADoB = rawRoster[empA].skills.includes(skillNames[skillB]);
-                const canBDoA = rawRoster[empB].skills.includes(skillNames[skillA]);
-                if (!canADoB || !canBDoA) continue;
-                // Helper: Count how many times an employee breaks their skill continuity
-                const cntTran = (emp, testSkill) => {
-                    let trans = 0;
-                    if (sched[t-1][emp] !== undefined && sched[t-1][emp] !== testSkill) trans++;
-                    if (sched[t+1][emp] !== undefined && sched[t+1][emp] !== testSkill) trans++;
-                    return trans;
-                };
-                // Evaluate the total system friction before and after a hypothetical swap
-                const currentFriction = cntTran(empA, skillA) + cntTran(empB, skillB);
-                const swappedFriction = cntTran(empA, skillB) + cntTran(empB, skillA);
-                // If a swap reduces the number of broken skill blocks, execute the swap
-                if (swappedFriction < currentFriction) {
-                    sched[t][empA] = skillB;
-                    sched[t][empB] = skillA;
-                }
-            }
-        }
-    }
+        if (demandRow) {
+            skillNames.forEach((s, sIdx) => {
+                hourDemand[sIdx] = parseFloat(demandRow[s]) || 0;
+            });
+        }
+        // --- Hard Demand Fulfillment ---
+        for (let sIdx = 0; sIdx < skillNames.length; sIdx++) {
+            let needed = hourDemand[sIdx];
+            while (needed > 0 && unassigned.length > 0) {
+                // Sort unassigned pool by INERTIA (Did they do this skill last hour?)
+                unassigned.sort((a, b) => {
+                    const aInertia = (t > 0 && sched[t - 1][a] === sIdx) ? 1 : 0;
+                    const bInertia = (t > 0 && sched[t - 1][b] === sIdx) ? 1 : 0;
+                    return bInertia - aInertia; // Descending priority
+                });
+                const empIdx = unassigned.find(idx => rawRoster[idx].skills.includes(skillNames[sIdx]));
+                if (empIdx !== undefined) {
+                    sched[t][empIdx] = sIdx;
+                    unassigned = unassigned.filter(id => id !== empIdx); // Remove from pool
+                    needed--;
+                } else {
+                    break;
+                }
+            }
+        }
+        // --- Surplus Allocation (Decay + Inertia) ---
+        unassigned.forEach(empIdx => {
+            const empSkills = (rawRoster[empIdx].skills || [])
+                .map(s => skillNames.indexOf(s))
+                .filter(idx => idx !== -1);
+            if (empSkills.length === 0) return;
+            let bestSkill = empSkills[0];
+            let bestScore = -1;
+            empSkills.forEach(sIdx => {
+                let score = skillScores[sIdx];
+                // Apply Inertia Multiplier if they performed this skill last hour
+                if (t > 0 && sched[t - 1][empIdx] === sIdx) {
+                    score *= INERTIA_MULTIPLIER;
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSkill = sIdx;
+                }
+            });
+            // Lock assignment and decay the global score for that skill
+            sched[t][empIdx] = bestSkill;
+            skillScores[bestSkill] *= DECAY_FACTOR;
+        });
+        skillScores = skillScores.map(s => s + 0.1);
+    }
 
-    // ========================================================================
-    // CONSTRUCT FINAL ROSTER
-    // ========================================================================
-    const finalRoster = JSON.parse(JSON.stringify(rawRoster));
-    finalRoster.forEach((emp, eIdx) => {
-        for (let t = 0; t < 168; t++) {
-            // Apply the smoothed skill directly to the schedule array where they are active
-            if (emp.schedule[t] !== null) {
-                const assignedSkillIdx = sched[t][eIdx];
-                if (assignedSkillIdx !== undefined && assignedSkillIdx !== -1) {
-                    emp.schedule[t] = skillNames[assignedSkillIdx];
-                }
-            }
-        }
-    });
+    // ========================================================================
+    // BACKWARD PASS (Orphan Eradication / Smoothing Swaps)
+    // ========================================================================
+    // Scan backwards from the end of the week down to hour 1
+    for (let t = 166; t >= 1; t--) {
+        const empsAtT = Object.keys(sched[t]).map(Number);
+        // Compare every pair of employees working at hour 't'
+        for (let i = 0; i < empsAtT.length; i++) {
+            for (let j = i + 1; j < empsAtT.length; j++) {
+                const empA = empsAtT[i];
+                const empB = empsAtT[j];
+                const skillA = sched[t][empA];
+                const skillB = sched[t][empB];
+                if (skillA === skillB) continue; // no swap needed
+                // Ensure both employees are physically capable of performing the other's skill
+                const canADoB = rawRoster[empA].skills.includes(skillNames[skillB]);
+                const canBDoA = rawRoster[empB].skills.includes(skillNames[skillA]);
+                if (!canADoB || !canBDoA) continue;
+                // Helper: Count how many times an employee breaks their skill continuity
+                const cntTran = (emp, testSkill) => {
+                    let trans = 0;
+                    if (sched[t - 1][emp] !== undefined && sched[t - 1][emp] !== testSkill) trans++;
+                    if (sched[t + 1][emp] !== undefined && sched[t + 1][emp] !== testSkill) trans++;
+                    return trans;
+                };
+                // Evaluate the total system friction before and after a hypothetical swap
+                const currentFriction = cntTran(empA, skillA) + cntTran(empB, skillB);
+                const swappedFriction = cntTran(empA, skillB) + cntTran(empB, skillA);
+                // If a swap reduces the number of broken skill blocks, execute the swap
+                if (swappedFriction < currentFriction) {
+                    sched[t][empA] = skillB;
+                    sched[t][empB] = skillA;
+                }
+            }
+        }
+    }
 
-    return finalRoster;
+    // ========================================================================
+    // CONSTRUCT FINAL ROSTER
+    // ========================================================================
+    const finalRoster = JSON.parse(JSON.stringify(rawRoster));
+    finalRoster.forEach((emp, eIdx) => {
+        for (let t = 0; t < 168; t++) {
+            // Apply the smoothed skill directly to the schedule array where they are active
+            if (emp.schedule[t] !== null) {
+                const assignedSkillIdx = sched[t][eIdx];
+                if (assignedSkillIdx !== undefined && assignedSkillIdx !== -1) {
+                    emp.schedule[t] = skillNames[assignedSkillIdx];
+                }
+            }
+        }
+    });
+
+    return finalRoster;
 }
 
 // ============================================================================
@@ -222,11 +220,9 @@ async function solveSchedulingMILP(params) {
     // Validate Headcount
     let preferredCount = parseInt(preferredEmployees) || employees.length;
     if (preferredCount > employees.length) preferredCount = employees.length;
-    const isFullRoster = preferredCount === employees.length;
 
-    // Time Limits
-    const SINGLE_PASS_LIMIT = 300; // Time for Full Roster
-    const DOUBLE_PASS_LIMIT = 150; // Time for Partial Roster (1 of 2 Passes)
+    // Time Limit
+    const TIME_LIMIT = 600; // Time for Full Roster
 
     // Pass Initialization Message to Console
     console.log(`%c>> SOLVER START: Target ${preferredCount} (Total Pool: ${employees.length})`, "color: green; font-weight: bold;");
@@ -284,10 +280,11 @@ async function solveSchedulingMILP(params) {
              * s_min: Penalty for missing minimum hours, incentivize initial fill-in
              */
             binaries.add(`u_${eIdx}`);
-            continuous.push(`reg_${eIdx}`, `ot_${eIdx}` );
+            continuous.push(`reg_${eIdx}`, `ot_${eIdx}`);
 
             // Objective Penalty Weights
-            const CONTIGUITY_PENALTY = baseWage * 10.0;
+            const BLOCK_PENALTY = 300;
+            const CONTIGUITY_PENALTY = 25;
             const symmetryBreak = (eIdx / employees.length) * 0.001;
             const effectiveWage = baseWage - symmetryBreak;
 
@@ -314,7 +311,7 @@ async function solveSchedulingMILP(params) {
                 const endVal = `end_e${eIdx}_d${d}`;
                 continuous.push(da, startVal, endVal);
 
-                // Contiguity Penalty (Applied directly to variables)
+                // Contiguity Penalty
                 objTerms.push(`${fmt(CONTIGUITY_PENALTY)} end_e${eIdx}_d${d}`);
                 objTerms.push(`-${fmt(CONTIGUITY_PENALTY)} start_e${eIdx}_d${d}`);
                 objTerms.push(`${fmt(CONTIGUITY_PENALTY)} da_${eIdx}_${d}`);
@@ -332,9 +329,9 @@ async function solveSchedulingMILP(params) {
                 constraints.push(` z_s_${eIdx}_d${d}: ${startVal} - 24 ${da} <= 0`);
 
                 let dayY = [];
-
+                let lastHour = -1;
                 // --- Hourly Logic Constraints ---
-                avail.forEach(h => {
+                avail.forEach((h, index) => {
                     const t = d * 24 + h;
                     const mySkills = (emp.skills || []).map(s => s.trim());
 
@@ -347,11 +344,24 @@ async function solveSchedulingMILP(params) {
 
                     // CORE WORKING BINARY: y_{e,t} (1 if e working at t, 0 if off)
                     const y = `y_${eIdx}_${t}`;
+                    const block = `blok_${eIdx}_${t}`;
                     binaries.add(y);
                     dayY.push(y);
                     empAllY.push(y);
-
+                    continuous.push(block);
+                    objTerms.push(`${fmt(BLOCK_PENALTY)} ${block}`);
                     objTerms.push(`-${fmt(CONTIGUITY_PENALTY)} y_${eIdx}_${t}`);
+
+                    const midDist = Math.abs(h - 15) * 0.01;
+                    objTerms.push(`${fmt(midDist)} y_${eIdx}_${t}`);
+
+                    if (t % 24 === 0 || lastHour !== t - 1) {
+                        constraints.push(`tr_${eIdx}_${t}: ${block} - ${y} >= 0`);
+                    } else {
+                        const prevY = `y_${eIdx}_${lastHour}`;
+                        constraints.push(`tr_${eIdx}_${t}: ${block} - ${y} + ${prevY} >= 0`);
+                    }
+                    lastHour = t;
 
                     // ------------------------------------------------------------
                     // CONTIGUITY "SQUEEZE" CONSTRAINTS
@@ -399,6 +409,10 @@ async function solveSchedulingMILP(params) {
                 if (dayY.length > 0) {
                     constraints.push(` set_da_${eIdx}_d${d}: ${dayY.join(" + ")} - 24 ${da} <= 0`);
                     empDailyActive.push(da);
+
+                    const sumY = dayY.join(" - ");
+                    constraints.push(` span_${eIdx}_d${d}: ${endVal} - ${startVal} + ${da} - ${sumY} >=0`);
+                    constraints.push(` span_${eIdx}_d${d}: ${endVal} - ${startVal} + ${da} - ${sumY} <=0.01`);
                 }
             }
 
@@ -413,7 +427,7 @@ async function solveSchedulingMILP(params) {
             if (safeMinShift > 0) {
                 constraints.push(` minh_${eIdx}: reg_${eIdx} - ${fmt(safeMinShift)} u_${eIdx} >= 0`);
             }
-            
+
             // OT Cap: Hard limit on overtime (e.g., max 20 hours OT)
             constraints.push(` ot_${eIdx}: ot_${eIdx} <= 20`);
 
@@ -440,7 +454,7 @@ async function solveSchedulingMILP(params) {
 
         // Headcount Constraint
         const allU = batchEmployees.map((_, i) => `u_${i}`);
-        constraints.push(` wf_cap: ${allU.join(" + ")} = ${fmt(targetHeadcount)}`);
+        constraints.push(` wf_cap: ${allU.join(" + ")} >= ${fmt(targetHeadcount)}`);
 
         // --- Formatting Bounds ---
         const relaxedBounds = continuous
@@ -503,67 +517,13 @@ async function solveSchedulingMILP(params) {
         });
     };
 
-
     // ========================================================================
     // MAIN EXECUTION FLOW
     // ========================================================================
-
-    /**
-     * For a Full Roster, we run the solver once for four minutes; while longer
-     * passes can be performed, even waiting for over 10 minutes doesn't offer
-     * meaningful improvements over the output at four minutes.  Therefore, this
-     * decision is made for useability.
-     */
-    if (isFullRoster) {
-        const result = runSolverPass(employees, preferredCount, SINGLE_PASS_LIMIT);
-
-        if (!result.Columns) return { status: 'Error', error: "Infeasible or Timeout" };
-
-        const roster = parseResultToRoster(employees, result.Columns);
-        return finalizeAndReturn(roster, result.ObjectiveValue);
-    }
-
-    /**
-     * For a Partial Roster, the selection of employees is performed in two passes.
-     * The first pass is to select the best employees, and the second pass is to
-     * optimize those selected employees.  This is to help give stability to the 
-     * solution.  These two passes are each 2.5 minutes, which is how long they need
-     * to reach stable blocked solutions when ran in parallel.  This is due to the
-     * Optimize Staffing function, which runs 2 workers in parallel--which allows
-     * for a much quicker solution.  However, this search across several different
-     * configurations in parallel needs additional time for constistent, stable results.
-     */
-    else {
-        // Select the best employees
-        const result1 = runSolverPass(employees, preferredCount, DOUBLE_PASS_LIMIT);
-        if (!result1.Columns) return { status: 'Error', error: "Pass 1 Infeasible" };
-        const rosterPass1 = parseResultToRoster(employees, result1.Columns);
-        // Identify the Selected Employees to Schedule
-        const activeEmployees = employees.filter((_, i) => rosterPass1[i].isSelected);
-        // We use the original employee objects to preserve IDs and Data
-        const droppedEmployees = employees.filter((_, i) => !rosterPass1[i].isSelected);
-        // Optimize these active employees
-        const result2 = runSolverPass(activeEmployees, activeEmployees.length, DOUBLE_PASS_LIMIT);
-        if (!result2.Columns) {
-            console.warn(">> Pass 2 Failed. Reverting to Pass 1 result.");
-            return finalizeAndReturn(rosterPass1, result1.ObjectiveValue);
-        }
-        const rosterPass2 = parseResultToRoster(activeEmployees, result2.Columns);
-
-        // Construct full roster
-        const activeMap = new Map(rosterPass2.map(r => [r.id, r]));
-        const fullRoster = employees.map(emp => {
-            if (activeMap.has(emp.id)) return activeMap.get(emp.id);
-            // Return empty record for unscheduled employees
-            return {
-                id: emp.id, skills: emp.skills, pay: parseFloat(emp.pay) || 15,
-                schedule: Array(168).fill(null),
-                regHrs: 0, otHrs: 0
-            };
-        });
-
-        return finalizeAndReturn(fullRoster, result2.ObjectiveValue);
-    }
+    const result = runSolverPass(employees, preferredCount, TIME_LIMIT);
+    if (!result.Columns) return { status: 'Error', error: "Infeasible or Timeout" };
+    const roster = parseResultToRoster(employees, result.Columns);
+    return finalizeAndReturn(roster, result.ObjectiveValue);
 
     // ========================================================================
     // FINALIZE & RETURN
