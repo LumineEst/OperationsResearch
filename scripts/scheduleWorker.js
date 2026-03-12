@@ -571,7 +571,6 @@ async function solveSchedulingMILP(params) {
     // STOCHASTIC MONTE CARLO PASS (Fractional Simulation)
     // ========================================================================
     if (params.mode === 'stochasticFractional') {
-        // The main thread has already trimmed and perturbed rosters
         const relaxedResult = runSolverPass(params.employees, {
             targetHeadcount: null,
             timeLimit: 60,
@@ -580,25 +579,40 @@ async function solveSchedulingMILP(params) {
             quiet: true
         });
 
-        // If doing continously relaxed simulation, return the relaxed result
         if (relaxedResult && relaxedResult.Columns) {
             let fractionalHeadcount = 0;
-            let scheduledHours = 0;
-            let activeEmpIndices = [];
+            let employeeUtilization = {};
+            let baselineShifts = [];
 
-            params.employees.forEach((_, eIdx) => {
+            params.employees.forEach((emp, eIdx) => {
                 const u = relaxedResult.Columns[`u_${eIdx}`]?.Primal || 0;
                 fractionalHeadcount += u;
+                employeeUtilization[emp.id] = u;
 
-                // Track total hours scheduled to calculate the Add-Back Target later
-                scheduledHours += (relaxedResult.Columns[`reg_${eIdx}`]?.Primal || 0) +
-                    (relaxedResult.Columns[`ot_${eIdx}`]?.Primal || 0);
+                // --- EXTRACT DAILY SHIFT PROFILES ---
+                for (let d = 0; d < 7; d++) {
+                    let shiftSegments = [];
+                    for (let h = 0; h < 24; h++) {
+                        const t = d * 24 + h;
+                        const yVal = relaxedResult.Columns[`y_${eIdx}_${t}`]?.Primal || 0;
 
-                // If utilized even a tiny bit, mark as an active baseline employee
-                if (u > 0.01) activeEmpIndices.push(eIdx);
+                        if (yVal > 0.1) {
+                            let bestSkill = null;
+                            let maxW = 0;
+                            skillNames.forEach((s, sIdx) => {
+                                const wVal = relaxedResult.Columns[`w_${eIdx}_${t}_${sIdx}`]?.Primal || 0;
+                                if (wVal > maxW) { maxW = wVal; bestSkill = s; }
+                            });
+                            if (bestSkill) shiftSegments.push({ hour: h, skill: bestSkill });
+                        }
+                    }
+                    if (shiftSegments.length > 0) {
+                        baselineShifts.push({ day: d, segments: shiftSegments });
+                    }
+                }
             });
 
-            return { status: 'Optimal', result: { fractionalHeadcount, scheduledHours, activeEmpIndices } };
+            return { status: 'Optimal', result: { fractionalHeadcount, employeeUtilization, baselineShifts } };
         } else {
             return { status: 'Error', error: 'Relaxed simulation failed or timed out.' };
         }
