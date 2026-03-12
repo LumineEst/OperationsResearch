@@ -21,14 +21,16 @@ window.ScheduleModule = {
             if (el) el.addEventListener('change', () => this.requestSolve());
         });
 
-        // Add event listener for employee count input
+        // Add event listener for sidebar inputs
         const empCountInput = document.getElementById('employeeCount');
-        if (empCountInput) {
-            empCountInput.addEventListener('change', () => this.requestSolve());
-            empCountInput.addEventListener('keydown', (e) => {
+        const callOutInput = document.getElementById('callOutRateInput');
+        const timerInput = document.getElementById('timerLimit');
+        for (const input of [empCountInput, callOutInput, timerInput]) {
+            if (input) input.addEventListener('change', () => this.requestSolve());
+            input?.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     e.preventDefault();
-                    empCountInput.blur();
+                    input.blur();
                     this.requestSolve();
                 }
             });
@@ -112,18 +114,16 @@ window.ScheduleModule = {
      */
     requestSolve() {
         if (!window.schedState.employees.length) return;
-        // Instantly kill any running single or parallel searches & clear old timers
+        // Instantly kill any running searches
         this.abortActiveOptimization();
 
         // Reset KPI Scorecard
         if (window.resetGlobalKPI) window.resetGlobalKPI();
 
         // Restart the global solver countdown, and render the solver dashboard
-        const totalEmps = window.schedState.employees.length;
-        const inputVal = document.getElementById('employeeCount')?.value;
-        window.schedState.solverTimeLeft = ((parseInt(inputVal) || totalEmps) < totalEmps) ? 300 : 300;
+        window.schedState.solverTimeLeft = parseInt(document.getElementById('timerLimit')?.value * 60) || 900;
 
-        this.startGlobalTicker(); // Timer is safely started AFTER the kill switch
+        this.startGlobalTicker();
         this.renderSolverDashboard();
 
         // Prepare the parameters for the worker
@@ -133,7 +133,8 @@ window.ScheduleModule = {
             // Copy the list of demands to the parameters
             demands: JSON.parse(JSON.stringify(window.schedState.demands)),
             // Get the number of employees to prefer from the UI
-            preferredEmployees: document.getElementById('employeeCount')?.value || 100
+            preferredEmployees: document.getElementById('employeeCount')?.value || 100,
+            timeLimit: document.getElementById('timerLimit')?.value * 60 || 900
         };
 
         // Create a new Worker Instance
@@ -141,11 +142,35 @@ window.ScheduleModule = {
 
         // Define the handler for the worker messages
         window.currentWorker.onmessage = (e) => {
-            // Decrement the solver time left
-            window.schedState.solverTimeLeft = 0;
-            clearInterval(this.tickerInterval);
             // Get the message type, status, and result
-            const { type, status, result } = e.data;
+            const { type, status, result, data } = e.data;
+
+            if (type === 'metrics') {
+                const elBin = document.getElementById('metric-binaries');
+                const elCont = document.getElementById('metric-continuous');
+                const elCons = document.getElementById('metric-constraints');
+                if (elBin) elBin.textContent = data.binaries.toLocaleString();
+                if (elCont) elCont.textContent = data.continuous.toLocaleString();
+                if (elCons) elCons.textContent = data.constraints.toLocaleString();
+                return;
+            }
+
+            if (type === 'result' || type === 'crash') {
+                window.schedState.solverTimeLeft = 0;
+                if (this.tickerInterval) clearInterval(this.tickerInterval);
+                window.currentWorker.terminate();
+                if (status === 'Optimal') {
+                    window.schedState.results = result;
+                    if (window.updateResultsUI) window.updateResultsUI();
+                    updateStatus("Optimal Roster Found", "optimal");
+                } else {
+                    // If not 'Optimal', update the status message and scheduling panel error message
+                    updateStatus("Infeasible", "error");
+                    document.getElementById('scheduling-panel-sub').innerHTML =
+                        `<div class="error-state">Optimization failed: ${status}</div>`;
+                }
+            };
+
 
             // If optimal, update the global state and update the UI
             if (type === 'result' && status === 'Optimal') {
@@ -169,7 +194,7 @@ window.ScheduleModule = {
     /**Updates the background solver countdown in the global state.
      * This function starts a ticker interval that decrements the solver time left 
      * and updates the global state and the countdown display.  When the time left 
-     * is 0, the ticker is stopped.  Set to 5 minutes to match the Worker Timeout.
+     * is 0, the ticker is stopped.
      */
     startGlobalTicker() {
         if (this.tickerInterval) clearInterval(this.tickerInterval); // Reset the ticker
@@ -210,21 +235,6 @@ window.ScheduleModule = {
         const container = document.getElementById('scheduling-panel-sub');
         if (!container) return;
 
-        // Calculate the total number of parameters in the model
-        const E = window.schedState.employees.length; // Number of employees
-        const S = this.skillNames.length; // Number of skill levels (1-5)
-        const T = 77; // Number of operational hours in a week
-        const D = 7; // Number of days in a week
-
-        // Binary decision variables
-        const binaryVars = (E * T) + E; // Total number of binary decision variables
-        // Continuous decision variables = Assignments + Shift Bounds + Demand Slack
-        const continuousVars = (E * T * S) + (E * D * 3) + (E * 3); // Total number of continuous decision variables
-        // Total Explicity Variable Bounds
-        const totalBounds = continuousVars + (E * D) + (E * T * S);
-        // Total constraints = Demand Satisfaction + Skill Linking and Bounds + Daily Shift Logic + Balancing Capacity and Global Links
-        const totalConstraints = (E * T * 4) + (E * D * 7) + (E * T * S * 1) + (E * 5) + (T * S) + 1 + totalBounds; // Total number of constraints
-
         // Calculate the time left in minutes and seconds
         const mins = Math.floor(window.schedState.solverTimeLeft / 60);
         const secs = window.schedState.solverTimeLeft % 60;
@@ -242,9 +252,9 @@ window.ScheduleModule = {
                 <div class="metrics-grid">
                     <h4>Model Complexity</h4>
                     <table class="metrics-table">
-                        <tr><td>Binary Decision Variables:</td><td>${binaryVars.toLocaleString()}</td></tr>
-                        <tr><td>Continuous Decision Variables:</td><td>${continuousVars.toLocaleString()}</td></tr>
-                        <tr><td>Constraints:</td><td>${totalConstraints.toLocaleString()}</td></tr>
+                        <tr><td>Binary Decision Variables:</td><td id='metric-binaries'> Compiling...</td></tr>
+                        <tr><td>Continuous Decision Variables:</td><td id='metric-continuous'> Compiling...</td></tr>
+                        <tr><td>Constraints:</td><td id='metric-constraints'> Compiling...</td></tr>
                     </table>
                 </div>
             </div>`;
@@ -323,7 +333,10 @@ window.ScheduleModule = {
             // Draw the charts and request a solve
             this.drawCharts();
             this.requestSolve();
-        } catch (err) { updateStatus("Import Error", "error"); }
+        } catch (err) {
+            console.error("Fatal Import Error:", err);
+            updateStatus("Import Error", "error");
+        }
     },
 
     /**Exports optimized rosters and improvement audits to an Excel file.
@@ -346,7 +359,6 @@ window.ScheduleModule = {
         const wb = XLSX.utils.book_new(); // Create a new workbook
         const roster = window.schedState.results.roster;
         const demands = window.schedState.demands;
-        const employees = window.schedState.employees;
 
         // Prepare the data for the Schedule by Day sheet
         const dayHeader = ["Day", "Hour", ...roster.map(e => e.id)];
@@ -427,7 +439,7 @@ window.ScheduleModule = {
         if (profileCard) {
             profileCard.querySelector('h3').innerHTML = `Employee Profile <span style="float:right; color:#2980b9; font-weight:400;"># ${emp.id}</span>`;
 
-            // Skill List Generation (Color-coded)
+            // Skill List Generation 
             const skillsHtml = emp.skills.map(s => `<div style="color:${color(s)}; font-weight:bold; margin-bottom:4px;">• ${s}</div>`).join('') || '<div style="color:#888;">No skills assigned</div>';
             document.getElementById('employeeProfileContent').innerHTML = `
                 <div class="profile-grid" style="display:grid; grid-template-columns: 1.2fr 1fr; gap: 20px;">
@@ -467,7 +479,6 @@ window.ScheduleModule = {
     },
 
     /**Generates training recommendations based on the active Roster.
-     * PRIORITIES:
      * 1. CONTIGUITY GAPS (Highest): Employee has a split shift (Work -> Off -> Work).
      * 2. CRITICAL COVERAGE: The store is understaffed, and this employee is available.
      * 3. FLEXIBILITY: Employee is already working but could learn a new skill for that hour.
@@ -504,9 +515,7 @@ window.ScheduleModule = {
                 }
             }
 
-            // If no shift today, skip
-            if (startH === -1) continue;
-
+            if (startH === -1) continue;  // If no shift today, skip
             // Now scan ONLY between startH and endH for gaps
             for (let h = startH; h <= endH; h++) {
                 const t = d * 24 + h;
@@ -562,7 +571,7 @@ window.ScheduleModule = {
             html += `<p style="font-size:0.75rem; color:#666;">No internal gaps or high-priority training needs found.</p>`;
         } else {
             topRecs.forEach(r => {
-                let badgeColor = "#2980b9"; // Blue (Flex)
+                let badgeColor = "#2980b9";
                 let label = "Flexibility";
 
                 if (r.type === 'BRIDGE') { badgeColor = "#8e44ad"; label = "Fill Internal Gap"; }
@@ -584,73 +593,225 @@ window.ScheduleModule = {
     },
 
     /**
-    * Orchestrates the Golden Section Search using the WorkforceOptimizer class.
-    * Updates the UI with status messages, runs the search, and applies the optimal result.
-    */
+     * Orchestrates the Parallel Stochastic Auto-Headcount Optimization.
+     * This function is called when the 'Optimize Staff' button is clicked.
+     * It calls the 'runStaffingOptimizer' function to perform the optimization.
+     * A continuously relaxed problem with hard blocking constraints is implemented
+     * the results of which is then used for a baseline roster, which is modified
+     * to simulate slightly different teams by increasing it based on the integrality
+     * criteria, and then randomly cut to simulate call-outs.  These rosters are then
+     * iteratively solved in parallel using the 'StochasticOptimizer' class.
+     * The result of this is then used to estimate the ideal number of employees to
+     * schedule to minimize costs while accounting for call-out rates.
+     */
     async runStaffingOptimizer() {
         if (!window.schedState.employees.length) return;
 
         const btn = document.getElementById('btnOptimizeStaff');
         const statusContainer = document.getElementById('scheduling-panel-sub');
         const originalText = btn.textContent;
-
-        // Resetting the GUI and disabling the button while the search is running
         btn.disabled = true;
-        btn.textContent = "Running Optimization...";
+        btn.textContent = "Running Parallel Auto-Optimizer...";
 
-        // Instantly kill any running single or parallel searches
         this.abortActiveOptimization();
+
+        const callOutRate = parseFloat(document.getElementById('callOutRateInput')?.value / 100) || 0.1;
+        const confidenceLevel = 95;  // Confidence Interval for 95% confidence
+        const numSimulations = 100;  // Number of Monte-Carlo simulations to run in parallel
+        const INTEGRALITY_BUFFER = 1.06; // Buffer for integrality criteria for relaxed -> discrete
+
         if (statusContainer) {
             statusContainer.innerHTML = `
-                <div class="solver-dashboard">
-                    <div class="timer-section">
-                        <h3 style="color:#8e44ad;">Staffing Level Optimizer Active</h3>
-                        <p>Performing Multi-Thread Optimal Staffing Search...<br></p>
-                        <div class="loading-spinner"></div>
-                    </div>
-                    <div class="metrics-grid">
-                        <p>This optimizer dynamically allocates 2 worker threads in parallel search.<br>
-                        Active threads calculate Golden Search pivots to narrow the search space, while idle threads pre-calculate speculative midpoints.<br>
-                        This then uses trinary logic to aggressively prune the search space, converging on an ideal solution quickly.</p>
-                        <p> Iterations may be tracked using the Browser's Development Tools.<br>
-                        This search will take approximately 15 minutes, Please wait...</p>
-                    </div>
-                </div>`;
+                <div class="solver-dashboard">
+                    <div class="timer-section">
+                        <h3 style="color:#8e44ad;">Stage 1: Establishing Baseline</h3>
+                        <p>Finding absolute minimum required headcount and scheduled hours...</p>
+                        <div class="loading-spinner"></div>
+                    </div>
+                </div>`;
         }
 
         try {
-            // Prepare Data
-            const params = {
-                employees: JSON.parse(JSON.stringify(window.schedState.employees)),
-                demands: JSON.parse(JSON.stringify(window.schedState.demands))
+            const masterEmployees = JSON.parse(JSON.stringify(window.schedState.employees));
+            const demands = JSON.parse(JSON.stringify(window.schedState.demands));
+
+            // --- STAGE 1: BASELINE SOLVE ---
+            const baselineParams = { employees: masterEmployees, demands, mode: 'stochasticFractional' };
+            const baselineData = await new Promise((resolve, reject) => {
+                const w = new Worker('scripts/scheduleWorker.js');
+                w.onmessage = (e) => {
+                    const { type, status, result, error } = e.data;
+                    if (type === 'result' || type === 'crash') {
+                        w.terminate();
+                        if (status === 'Optimal') resolve(result); // Returns headcount, scheduledHours, activeEmpIndices
+                        else reject(new Error(error || "Baseline failed"));
+                    }
+                };
+                w.onerror = () => {
+                    w.terminate();
+                    reject(new Error("Worker thread crashed."));
+                };
+                w.postMessage({ type: 'solve', data: baselineParams });
+            });
+
+            // Separate the master roster into "Starters" (Scheduled) and "Bench" (Unscheduled)
+            const activeIds = new Set(baselineData.activeEmpIndices.map(idx => masterEmployees[idx].id));
+            const starters = masterEmployees.filter(e => activeIds.has(e.id));
+            const bench = masterEmployees.filter(e => !activeIds.has(e.id));
+
+            // Calculate exact hours needed to cover the buffer
+            const addBackTargetHours = baselineData.scheduledHours * callOutRate * INTEGRALITY_BUFFER;
+            const simulationPools = [];
+
+            for (let i = 0; i < numSimulations; i++) {
+                let simPool = JSON.parse(JSON.stringify(starters));
+                let availableBench = JSON.parse(JSON.stringify(bench));
+
+                // Shuffle the bench randomly for this specific simulation
+                availableBench.sort(() => Math.random() - 0.5);
+
+                // Add random bench players until we hit our Add-Back Target
+                let addedHours = 0;
+                while (addedHours < addBackTargetHours && availableBench.length > 0) {
+                    const emp = availableBench.pop();
+                    const empAvailHours = Object.values(emp.availability).reduce((sum, arr) => sum + arr.length, 0);
+                    addedHours += empAvailHours;
+                    simPool.push(emp);
+                }
+
+                // Apply Call-Out Perturbation to this pool
+                simPool.forEach(emp => {
+                    for (let d = 0; d < 7; d++) {
+                        if (emp.availability[d] && emp.availability[d].length > 0) {
+                            if (Math.random() < callOutRate) emp.availability[d] = [];
+                        }
+                    }
+                });
+
+                simulationPools.push(simPool);
+            }
+
+            if (statusContainer) {
+                statusContainer.innerHTML = `
+                    <div class="solver-dashboard">
+                        <div class="timer-section">
+                            <h3 style="color:#8e44ad;">Stage 1: Establishing Baseline</h3>
+                            <p>Finding absolute minimum required headcount and scheduled hours...</p>
+                            <div class="loading-spinner"></div>
+                            <h3 style="color:#8e44ad;">Stage 2: Stochastic Monte Carlo</h3>
+                            <p>Simulating <span id="simProgress">0 / ${numSimulations}</span> fractional scenarios...</p>
+                            <div class="loading-spinner"></div>
+                        </div>
+                        <div class="metrics-grid">
+                            <p><strong>Baseline Scheduled:</strong> ${Math.round(baselineData.scheduledHours)} hrs</p>
+                            <p><strong>Bench Target Re-Allocation:</strong> +${Math.round(addBackTargetHours)} hrs</p>
+                            <p>Testing restricted pools against a ${callOutRate * 100}% call-out rate...</p>
+                        </div>
+                    </div>`;
+            }
+
+            // --- STAGE 3: RUN MONTE CARLO ---
+            this.stochasticPool = new StochasticOptimizer('scripts/scheduleWorker.js');
+            const simResults = await this.stochasticPool.runMonteCarlo(simulationPools, demands);
+
+            if (simResults.length === 0) throw new Error("All stochastic simulations failed.");
+
+            // Calculate Percentile
+            const sortedSims = simResults.sort((a, b) => a - b);
+            const index = (confidenceLevel / 100) * (sortedSims.length - 1);
+            const lower = Math.floor(index);
+            const upper = Math.ceil(index);
+            const weight = index - lower;
+            const targetFractional = lower === upper ? sortedSims[lower] : sortedSims[lower] * (1 - weight) + sortedSims[upper] * weight;
+            // Apply Buffer & Ceiling
+            const finalDiscreteTarget = Math.ceil(targetFractional * INTEGRALITY_BUFFER);
+
+            // --- STAGE 4: DISCRETE MILP ---
+            if (statusContainer) {
+                statusContainer.innerHTML = `
+                    <div class="solver-dashboard">
+                        <div class="timer-section">
+                            <h3 style="color:#8e44ad;">Stage 1: Establishing Baseline</h3>
+                            <p>Finding absolute minimum required headcount and scheduled hours...</p>
+                            <div class="loading-spinner"></div>
+                            <h3 style="color:#8e44ad;">Stage 2: Stochastic Monte Carlo</h3>
+                            <p>Simulating <span id="simProgress">0 / ${numSimulations}</span> fractional scenarios...</p>
+                            <div class="loading-spinner"></div>
+                        </div>
+                        <div class="metrics-grid">
+                            <p><strong>Baseline Scheduled:</strong> ${Math.round(baselineData.scheduledHours)} hrs</p>
+                            <p><strong>Bench Target Re-Allocation:</strong> +${Math.round(addBackTargetHours)} hrs</p>
+                            <p>Testing restricted pools against a ${callOutRate * 100}% call-out rate...</p>
+                        </div>
+                        <div class="timer-section">
+                            <h3 style="color:#27ae60;">Stochastic Search Complete</h3>
+                            <div style="font-size: 1.1rem; margin: 15px 0;">
+                                Simulated Base Need: <strong>${targetFractional.toFixed(2)}</strong> employees<br>
+                                Integrality Buffer: <strong>+${((INTEGRALITY_BUFFER - 1) * 100).toFixed(0)}%</strong>
+                            </div>
+                            <div class="loading-spinner"></div>
+                        </div>
+                        <div class="metrics-grid">
+                            <h4 style="color:#2980b9;">Stage 3: Finalizing Discrete Roster</h4>
+                            <p>Executing strict MILP pass for a firm target of <strong>${finalDiscreteTarget}</strong> employees.</p>
+                        </div>
+                    </div>`;
+            }
+
+            const finalParams = {
+                employees: masterEmployees,
+                demands,
+                preferredEmployees: finalDiscreteTarget,
+                autoOptimizeHeadcount: false,
+                timeLimit: document.getElementById('timerLimit')?.value * 60 || 900
             };
 
-            // Instantiate and Run Optimizer with 2 workers for parallel search steps
-            this.optimizer = new WorkforceOptimizer('scripts/scheduleWorker.js', 2);
-            const bestResult = await this.optimizer.findOptimalHeadcount(params);
+            const bestResult = await new Promise((resolve, reject) => {
+                window.currentWorker = new Worker('scripts/scheduleWorker.js');
+                window.currentWorker.onmessage = (e) => {
+                    const { type, status, result, error, data } = e.data;
+                    if (type === 'metrics') {
+                        const elBin = document.getElementById('metric-binaries');
+                        const elCont = document.getElementById('metric-continuous');
+                        const elCons = document.getElementById('metric-constraints');
+                        if (elBin) elBin.textContent = data.binaries.toLocaleString();
+                        if (elCont) elCont.textContent = data.continuous.toLocaleString();
+                        if (elCons) elCons.textContent = data.constraints.toLocaleString();
+                        return;
+                    }
 
-            // Apply Results
+                    if (type === 'result' || type === 'crash') {
+                        window.currentWorker.terminate();
+                        if (status === 'Optimal') resolve(result);
+                        else reject(new Error(error || status));
+                    }
+                };
+                window.currentWorker.onerror = () => {
+                    window.currentWorker.terminate();
+                    reject(new Error("Worker thread crashed."));
+                };
+                window.currentWorker.postMessage({ type: 'solve', data: finalParams });
+            });
+
             if (bestResult) {
-                // Update Global State and Preferred Employee Input Field
-                window.schedState.results = bestResult; // The full result object
-                const optimalCount = bestResult.optimalHeadcount || document.getElementById('employeeCount').value;
-                document.getElementById('employeeCount').value = optimalCount;
-                if (window.updateResultsUI) {
-                    window.updateResultsUI();
-                }
-                // Render Charts
+                window.schedState.results = bestResult;
+                document.getElementById('employeeCount').value = finalDiscreteTarget;
+                if (window.updateResultsUI) window.updateResultsUI();
                 this.drawCharts();
-                updateStatus(`Optimization Complete: ${optimalCount} Employees`, "optimal");
+                if (typeof updateStatus === 'function') updateStatus(`Optimization Complete: ${finalDiscreteTarget} Employees`, "optimal");
             }
 
         } catch (err) {
             console.error("Optimization Error:", err);
-            updateStatus("Optimization Failed", "error");
+            if (typeof updateStatus === 'function') updateStatus("Optimization Failed", "error");
             if (statusContainer) statusContainer.innerHTML = `<div class="error-state">Optimization failed: ${err.message}</div>`;
         } finally {
-            // Reset Button State
             btn.disabled = false;
             btn.textContent = originalText;
+            if (this.stochasticPool) {
+                this.stochasticPool.terminate();
+                this.stochasticPool = null;
+            }
         }
     },
 
@@ -1055,3 +1216,81 @@ window.ScheduleModule = {
         svg.append("g").call(d3.axisLeft(y).ticks(5));
     }
 };
+
+/**
+ * Manages a pool of Web Workers to execute parallel Monte Carlo simulations.
+ * specifically, it uses a Web Worker to solve a stochastic fractional problem
+ * on continuously relaxed MILP scheduling problems.
+ */
+class StochasticOptimizer {
+    constructor(workerScript, numThreads = navigator.hardwareConcurrency || 4) {
+        this.workerScript = workerScript;
+        this.numThreads = Math.min(numThreads, 8);
+        this.workers = [];
+    }
+
+    async runMonteCarlo(simulationPools, demands) {
+        const numSimulations = simulationPools.length;
+        return new Promise((resolve, reject) => {
+            let completed = 0;
+            let results = [];
+            let taskIndex = 0;
+            let activeWorkers = 0;
+
+            const assignTask = (worker) => {
+                if (taskIndex < numSimulations) {
+                    activeWorkers++;
+                    worker.postMessage({
+                        type: 'solve',
+                        data: {
+                            demands: demands,
+                            employees: simulationPools[taskIndex],
+                            mode: 'stochasticFractional'
+                        }
+                    });
+                    taskIndex++;
+                } else if (activeWorkers === 0) {
+                    this.terminate();
+                    resolve(results);
+                }
+            };
+
+            for (let i = 0; i < this.numThreads; i++) {
+                const worker = new Worker(this.workerScript);
+                this.workers.push(worker);
+
+                worker.onmessage = (e) => {
+                    const { type, status, result, error } = e.data;
+                    if (type !== 'result' && type !== 'crash') return;
+                    activeWorkers--;
+
+                    if (type === 'result' && status === 'Optimal') {
+                        results.push(result.fractionalHeadcount);
+                    } else {
+                        console.warn("Simulation thread failed:", error || status);
+                    }
+
+                    completed++;
+                    const dash = document.getElementById('simProgress');
+                    if (dash) dash.textContent = `${completed} / ${numSimulations}`;
+
+                    assignTask(worker);
+                };
+
+                worker.onerror = (err) => {
+                    console.error("Worker fatal error:", err);
+                    activeWorkers--;
+                    completed++;
+                    assignTask(worker);
+                };
+
+                assignTask(worker);
+            }
+        });
+    }
+
+    terminate() {
+        this.workers.forEach(w => w.terminate());
+        this.workers = [];
+    }
+}

@@ -156,8 +156,12 @@
                         </div>
                         <div class="sidebar-content">
                             <div class="input-group">
-                                <label><strong>Scheduled Employees</strong></label>
-                                <input type="number" id="employeeCount" value="100">
+                                <label><strong>Min. Scheduled Employees</strong></label>
+                                <input type="number" id="employeeCount" value="100" step="1">
+                                <label><strong>Call-out Rate %</strong></label>
+                                <input type="number" id="callOutRateInput" value="10" max="50" min="0" step="1">
+                                <label><strong>Solver Time Limit (min)</strong></label>
+                                <input type="number" id="timerLimit" value="15" step="1">
                             </div>
                             <button id="btnOptimizeStaff" class="btn btn-accent" 
                                 style="width:100%; font-size: 0.8rem; background-color : var(--primary);" 
@@ -334,8 +338,7 @@
 
     <script src="script.js"></script>
     <script src="scripts/inventory.js"></script>
-    <script src="scripts/stocks.js"></script>
-    <script src="scripts/workforceOptimizer.js"></script>    
+    <script src="scripts/stocks.js"></script> 
     <script src="scripts/schedule.js"></script>
     <script src="scripts/orders.js"></script>
 </body>
