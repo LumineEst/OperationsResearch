@@ -724,21 +724,6 @@ window.ScheduleModule = {
             // Apply Buffer & Ceiling
             const finalDiscreteTarget = Math.ceil(targetFractional * INTEGRALITY_BUFFER);
 
-            // Calculate Resiliency Weights
-            const utilizationCounts = {};
-            simResults.forEach(sim => {
-                if (sim.employeeUtilization) {
-                    Object.entries(sim.employeeUtilization).forEach(([id, uVal]) => {
-                        utilizationCounts[id] = (utilizationCounts[id] || 0) + uVal;
-                    });
-                }
-            });
-
-            const maxUtil = Math.max(...Object.values(utilizationCounts), 1);
-            masterEmployees.forEach(emp => {
-                emp.resiliencyWeight = (utilizationCounts[emp.id] || 0) / maxUtil;
-            });
-
             console.groupCollapsed("%c=== Stochastic Optimization Complete ===", "color: #8e44ad; font-weight: bold;");
             console.log(` • Baseline Shifts per Week: ${totalShifts}`);
             console.log(` • Simulated Call-Outs per Pass: ${callOutShiftsTarget} full shifts (~${avgAddedHours.toFixed(1)} hrs)`);

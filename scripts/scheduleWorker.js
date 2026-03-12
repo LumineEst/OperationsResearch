@@ -11,7 +11,7 @@
  * skill assignments to binary shifts, minimizing branch-and-bound explosions.
  * Blocking is incentivized within the objective function, and not as a direct
  * constraint; which means that tighter schedules may result in a loosening of
- * the blocking behavior to meet constraints.  A smoothing Heuristic is used to
+ * the blocking behavior to meet constraints. A smoothing Heuristic is used to
  * reallocate skill assignments to balance overstaffing of skill-groups.
  * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
  * HiGHs Controls: https://dev.ampl.com/solvers/highs/options.html
@@ -24,8 +24,7 @@ let highsModule = null;
 
 /** Initialize Highs Module:
  * Attempts to load the WebAssembly solver from libs/highs.js
- * 2GB is allocated to ensure safe memory usage.  If calling
- * continuously relaxed, then 256MB for each of the 8 workers.
+ * Memory is allocated dynamically to ensure safe browser limits.
  */
 async function initHighs(memoryBytes) {
     if (highsModulePromise) return highsModulePromise;
@@ -58,146 +57,250 @@ function fmt(num) {
 
 /**
  * ============================================================================
- * TWO-PASS SKILL SMOOTHING HEURISTIC
+ * HIERARCHICAL DEMAND-BLOCK SMOOTHER (Tree Decomposition)
  * ============================================================================
- * Converts the solver's unbalanced skill allocations into a clean, 
- * contiguous integer schedule using an Inertia-Weighted Forward Pass and a 
- * Swap-Correcting Backward Pass.  This is an iterative process that aims to
- * reduce the number of overstaffed skill groups, and thus reduce the number of
- * unnecessary skill shifts during employee shifts.  This heuristic only works
- * with skill assignments, and does not shift scheduled shifts of employees.
+ * Decomposes daily demand into a stack of contiguous requirement blocks.
+ * Employs Dynamic Stress Updating, Volumetric Sorting (Stress * Duration),
+ * and Block Slicing (Maximal Sub-Interval Matching) to geometrically pack
+ * shifts using the least flexible employees first.
  */
 function smoothSkillAllocation(rawRoster, demands, skillNames) {
-    // Map active workers per hour
-    const sched = Array.from({ length: 168 }, () => ({})); // hour -> empIdx -> skillIdx
-    const activeAtHour = Array.from({ length: 168 }, () => []);
-    rawRoster.forEach((emp, eIdx) => {
-        for (let t = 0; t < 168; t++) {
-            if (emp.schedule[t] !== null) {
-                activeAtHour[t].push(eIdx);
-            }
-        }
-    });
-
-    const INERTIA_MULTIPLIER = 100.0; // Massive weight to prioritize staying in the same role
-    const DECAY_FACTOR = 0.5; // Exponential decay to spread surplus
-    let skillScores = new Array(skillNames.length).fill(1.0);
-
-    // ========================================================================
-    // FORWARD PASS (Chronological Inertia & Demand Fulfillment)
-    // ========================================================================
-    for (let t = 0; t < 168; t++) {
-        if (activeAtHour[t].length === 0) continue;
-        let unassigned = [...activeAtHour[t]];
-        let hourDemand = new Array(skillNames.length).fill(0);
-        // Map Hard Demand for Hour 't'
-        const day = Math.floor(t / 24);
-        const hour = t % 24;
-        const demandRow = demands.find(d => parseInt(d.day) === day && parseInt(d.hour) === hour);
-
-        if (demandRow) {
-            skillNames.forEach((s, sIdx) => {
-                hourDemand[sIdx] = parseFloat(demandRow[s]) || 0;
-            });
-        }
-        // --- Hard Demand Fulfillment ---
-        for (let sIdx = 0; sIdx < skillNames.length; sIdx++) {
-            let needed = hourDemand[sIdx];
-            while (needed > 0 && unassigned.length > 0) {
-                // Sort unassigned pool by employee inertia (Did they do this skill last hour?)
-                unassigned.sort((a, b) => {
-                    const aInertia = (t > 0 && sched[t - 1][a] === sIdx) ? 1 : 0;
-                    const bInertia = (t > 0 && sched[t - 1][b] === sIdx) ? 1 : 0;
-                    return bInertia - aInertia; // Descending priority
-                });
-                const empIdx = unassigned.find(idx => rawRoster[idx].skills.includes(skillNames[sIdx]));
-                if (empIdx !== undefined) {
-                    sched[t][empIdx] = sIdx;
-                    unassigned = unassigned.filter(id => id !== empIdx); // Remove from pool
-                    needed--;
-                } else {
-                    break;
-                }
-            }
-        }
-        // --- Surplus Allocation (Decay + Inertia) ---
-        unassigned.forEach(empIdx => {
-            const empSkills = (rawRoster[empIdx].skills || [])
-                .map(s => skillNames.indexOf(s))
-                .filter(idx => idx !== -1);
-            if (empSkills.length === 0) return;
-            let bestSkill = empSkills[0];
-            let bestScore = -1;
-            empSkills.forEach(sIdx => {
-                let score = skillScores[sIdx];
-                // Apply Inertia Multiplier if they performed this skill last hour
-                if (t > 0 && sched[t - 1][empIdx] === sIdx) {
-                    score *= INERTIA_MULTIPLIER;
-                }
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestSkill = sIdx;
-                }
-            });
-            // Lock assignment and decay the global score for that skill
-            sched[t][empIdx] = bestSkill;
-            skillScores[bestSkill] *= DECAY_FACTOR;
-        });
-        skillScores = skillScores.map(s => s + 0.1);
-    }
-
-    // ========================================================================
-    // BACKWARD PASS (Orphaned Skills Eradication / Smoothing Swaps)
-    // ========================================================================
-    // Scan backwards from the end of the week down to hour 1
-    for (let t = 166; t >= 1; t--) {
-        const empsAtT = Object.keys(sched[t]).map(Number);
-        // Compare every pair of employees working at hour 't'
-        for (let i = 0; i < empsAtT.length; i++) {
-            for (let j = i + 1; j < empsAtT.length; j++) {
-                const empA = empsAtT[i];
-                const empB = empsAtT[j];
-                const skillA = sched[t][empA];
-                const skillB = sched[t][empB];
-                if (skillA === skillB) continue; // no swap needed
-                // Ensure both employees are physically capable of performing the other's skill
-                const canADoB = rawRoster[empA].skills.includes(skillNames[skillB]);
-                const canBDoA = rawRoster[empB].skills.includes(skillNames[skillA]);
-                if (!canADoB || !canBDoA) continue;
-                // Helper: Count how many times an employee breaks their skill continuity
-                const cntTran = (emp, testSkill) => {
-                    let trans = 0;
-                    if (sched[t - 1][emp] !== undefined && sched[t - 1][emp] !== testSkill) trans++;
-                    if (sched[t + 1][emp] !== undefined && sched[t + 1][emp] !== testSkill) trans++;
-                    return trans;
-                };
-                // Evaluate the total system friction before and after a hypothetical swap
-                const currentFriction = cntTran(empA, skillA) + cntTran(empB, skillB);
-                const swappedFriction = cntTran(empA, skillB) + cntTran(empB, skillA);
-                // If a swap reduces the number of broken skill blocks, execute the swap
-                if (swappedFriction < currentFriction) {
-                    sched[t][empA] = skillB;
-                    sched[t][empB] = skillA;
-                }
-            }
-        }
-    }
-
-    // ========================================================================
-    // CONSTRUCT FINAL ROSTER
-    // ========================================================================
     const finalRoster = JSON.parse(JSON.stringify(rawRoster));
-    finalRoster.forEach((emp, eIdx) => {
-        for (let t = 0; t < 168; t++) {
-            // Apply the smoothed skill directly to the schedule array where they are active
-            if (emp.schedule[t] !== null) {
-                const assignedSkillIdx = sched[t][eIdx];
-                if (assignedSkillIdx !== undefined && assignedSkillIdx !== -1) {
-                    emp.schedule[t] = skillNames[assignedSkillIdx];
+
+    const getFlexibility = (emp) => (emp.skills || []).filter(s => skillNames.includes(s)).length;
+
+    // Process each day completely independently to isolate block interactions
+    for (let d = 0; d < 7; d++) {
+        const startT = d * 24;
+
+        // 1. ISOLATE DAILY ACTIVE WORKFORCE
+        const activeEmps = [];
+        finalRoster.forEach((emp, eIdx) => {
+            let working = Array(24).fill(false);
+            let assigned = Array(24).fill(null);
+            let isWorkingToday = false;
+
+            for (let h = 0; h < 24; h++) {
+                if (emp.schedule[startT + h] !== null) {
+                    isWorkingToday = true;
+                    working[h] = true;
+                    emp.schedule[startT + h] = null; // Clear the raw MILP skill assignments
+                }
+            }
+            if (isWorkingToday) {
+                activeEmps.push({ idx: eIdx, skills: emp.skills, flex: getFlexibility(emp), working, assigned });
+            }
+        });
+
+        // 2. ISOLATE DAILY DEMAND (Mutable and Immutable copies)
+        const dailyDemand = Array.from({ length: 24 }, () => ({}));
+        const originalDailyDemand = Array.from({ length: 24 }, () => ({}));
+        demands.filter(dem => dem.day === d).forEach(dem => {
+            skillNames.forEach(s => {
+                const req = parseFloat(dem[s]) || 0;
+                dailyDemand[dem.hour][s] = req;
+                originalDailyDemand[dem.hour][s] = req;
+            });
+        });
+
+        // 3. INITIAL DEMAND DECOMPOSITION (The Tree / Stack)
+        let demandBlocks = [];
+        skillNames.forEach(skill => {
+            let currentProfile = dailyDemand.map(h => h[skill] || 0);
+
+            while (Math.max(...currentProfile) > 0) {
+                let startHour = currentProfile.findIndex(val => val > 0);
+                let endHour = startHour;
+
+                while (endHour < 24 && currentProfile[endHour] > 0) endHour++;
+                endHour--; // Step back to the last valid contiguous hour
+
+                let minDemand = Math.min(...currentProfile.slice(startHour, endHour + 1));
+
+                // Create identical blocks for the width of the demand floor
+                for (let i = 0; i < minDemand; i++) {
+                    demandBlocks.push({ skill, start: startHour, end: endHour });
+                }
+
+                // Shave off the root, leaving the peaks (children) for the next iteration
+                for (let h = startHour; h <= endHour; h++) {
+                    currentProfile[h] -= minDemand;
+                }
+            }
+        });
+
+        // 4. DYNAMIC GREEDY ASSIGNMENT LOOP
+        while (demandBlocks.length > 0) {
+            // A. Dynamic Stress Calculation (Updates every loop as employees are consumed)
+            const capableSupply = Array.from({ length: 24 }, () => ({}));
+            for (let h = 0; h < 24; h++) {
+                skillNames.forEach(s => {
+                    capableSupply[h][s] = activeEmps.filter(e => e.working[h] && e.assigned[h] === null && e.skills.includes(s)).length;
+                });
+            }
+
+            // B. Volumetric Sorting (Total Stress = Avg Stress * Duration)
+            demandBlocks.forEach(b => {
+                let totalStress = 0;
+                for (let h = b.start; h <= b.end; h++) {
+                    const req = dailyDemand[h][b.skill] || 0;
+                    if (req === 0) continue;
+                    const supply = capableSupply[h][b.skill] || 0;
+                    totalStress += supply > 0 ? (req / supply) : 9999; // Massive penalty if impossible
+                }
+                b.volume = totalStress;
+            });
+
+            // Sort so the hardest, longest blocks are always popped first
+            demandBlocks.sort((a, b) => b.volume - a.volume);
+            const block = demandBlocks.shift();
+
+            if (block.volume === 0) continue; // Demand was already zeroed out
+
+            // C. Block Slicing / Sub-Interval Matching
+            let bestEmp = null;
+            let bestMatchStart = -1;
+            let bestMatchEnd = -1;
+            let maxOverlap = 0;
+            let bestFlex = 999; // Lower is better (protect generalists)
+
+            activeEmps.forEach(emp => {
+                if (!emp.skills.includes(block.skill)) return;
+
+                let currentStart = -1;
+                let currentOverlap = 0;
+                let localBestOverlap = 0;
+                let localBestStart = -1;
+                let localBestEnd = -1;
+
+                for (let h = block.start; h <= block.end; h++) {
+                    if (emp.working[h] && emp.assigned[h] === null) {
+                        if (currentStart === -1) currentStart = h;
+                        currentOverlap++;
+                    } else {
+                        if (currentOverlap > localBestOverlap) {
+                            localBestOverlap = currentOverlap;
+                            localBestStart = currentStart;
+                            localBestEnd = h - 1;
+                        }
+                        currentStart = -1;
+                        currentOverlap = 0;
+                    }
+                }
+                if (currentOverlap > localBestOverlap) {
+                    localBestOverlap = currentOverlap;
+                    localBestStart = currentStart;
+                    localBestEnd = block.end;
+                }
+
+                if (localBestOverlap > 0) {
+                    if (localBestOverlap > maxOverlap || (localBestOverlap === maxOverlap && emp.flex < bestFlex)) {
+                        maxOverlap = localBestOverlap;
+                        bestMatchStart = localBestStart;
+                        bestMatchEnd = localBestEnd;
+                        bestEmp = emp;
+                        bestFlex = emp.flex;
+                    }
+                }
+            });
+
+            // D. Execution & Geometric Slicing
+            if (bestEmp) {
+                // Lock the employee in
+                for (let h = bestMatchStart; h <= bestMatchEnd; h++) {
+                    bestEmp.assigned[h] = block.skill;
+                    dailyDemand[h][block.skill] = Math.max(0, dailyDemand[h][block.skill] - 1);
+                }
+
+                // If they couldn't cover the whole block, slice leftovers and re-queue them
+                if (bestMatchStart > block.start) {
+                    demandBlocks.push({ skill: block.skill, start: block.start, end: bestMatchStart - 1 });
+                }
+                if (bestMatchEnd < block.end) {
+                    demandBlocks.push({ skill: block.skill, start: bestMatchEnd + 1, end: block.end });
                 }
             }
         }
-    });
+
+        // 5. WRITE TO ROSTER & FILL SURPLUS LABOR
+        activeEmps.forEach(e => {
+            for (let h = 0; h < 24; h++) {
+                if (e.working[h]) {
+                    if (e.assigned[h] !== null) {
+                        finalRoster[e.idx].schedule[startT + h] = e.assigned[h];
+                    } else {
+                        // Surplus labor gets filled with their most common/valid skill
+                        const validSkills = e.skills.filter(s => skillNames.includes(s));
+                        finalRoster[e.idx].schedule[startT + h] = validSkills[0] || skillNames[0];
+                    }
+                }
+            }
+        });
+
+        // 6. DEMAND SWAP PASS (Fix shortages by stealing from surplus skills)
+        for (let h = 0; h < 24; h++) {
+            const t = startT + h;
+            skillNames.forEach(skill => {
+                let req = originalDailyDemand[h][skill] || 0;
+                let actual = activeEmps.filter(e => finalRoster[e.idx].schedule[t] === skill).length;
+
+                while (actual < req) {
+                    let potentialSwaps = activeEmps.filter(e =>
+                        finalRoster[e.idx].schedule[t] !== null &&
+                        finalRoster[e.idx].schedule[t] !== skill &&
+                        e.skills.includes(skill)
+                    );
+
+                    if (potentialSwaps.length === 0) break; // Mathematically impossible to fix
+
+                    // Sort to steal from the role with the highest over-staffing surplus
+                    potentialSwaps.sort((a, b) => {
+                        let skillA = finalRoster[a.idx].schedule[t];
+                        let skillB = finalRoster[b.idx].schedule[t];
+                        let surplusA = activeEmps.filter(e => finalRoster[e.idx].schedule[t] === skillA).length - (originalDailyDemand[h][skillA] || 0);
+                        let surplusB = activeEmps.filter(e => finalRoster[e.idx].schedule[t] === skillB).length - (originalDailyDemand[h][skillB] || 0);
+                        return surplusB - surplusA;
+                    });
+
+                    finalRoster[potentialSwaps[0].idx].schedule[t] = skill;
+                    actual++;
+                }
+            });
+        }
+
+        // 7. EMPLOYEE CONTIGUITY SWAP PASS (Iron out the boundaries)
+        for (let h = 1; h < 23; h++) {
+            const t = startT + h;
+            const empsAtT = activeEmps.filter(e => finalRoster[e.idx].schedule[t] !== null);
+
+            for (let i = 0; i < empsAtT.length; i++) {
+                for (let j = i + 1; j < empsAtT.length; j++) {
+                    const empA = empsAtT[i].idx;
+                    const empB = empsAtT[j].idx;
+                    const skillA = finalRoster[empA].schedule[t];
+                    const skillB = finalRoster[empB].schedule[t];
+
+                    if (skillA === skillB) continue;
+                    if (!rawRoster[empA].skills.includes(skillB) || !rawRoster[empB].skills.includes(skillA)) continue;
+
+                    const cntTran = (e, testSkill) => {
+                        let trans = 0;
+                        if (finalRoster[e].schedule[t - 1] !== null && finalRoster[e].schedule[t - 1] !== testSkill) trans++;
+                        if (finalRoster[e].schedule[t + 1] !== null && finalRoster[e].schedule[t + 1] !== testSkill) trans++;
+                        return trans;
+                    };
+
+                    const currentFriction = cntTran(empA, skillA) + cntTran(empB, skillB);
+                    const swappedFriction = cntTran(empA, skillB) + cntTran(empB, skillA);
+
+                    if (swappedFriction < currentFriction) {
+                        finalRoster[empA].schedule[t] = skillB;
+                        finalRoster[empB].schedule[t] = skillA;
+                    }
+                }
+            }
+        }
+    }
 
     return finalRoster;
 }
@@ -221,11 +324,8 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
  * @param {Array} timeLimit - The time limit in minutes.
  * @returns {Array} The smoothed roster.
  */
-// ============================================================================
-// BUILD LP STRING & SOLVE
-// ============================================================================
 async function solveSchedulingMILP(params) {
-    const { employees, demands, preferredEmployees, timeLimit = 15 } = params;
+    const { employees, demands, preferredEmployees, timeLimit = 20 } = params;
     const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
     const TIME_LIMIT = timeLimit;
     let targetCount = parseInt(preferredEmployees) || employees.length;
@@ -254,16 +354,20 @@ async function solveSchedulingMILP(params) {
             if (globalD > 0) validHours.add(t);
         });
 
-        // Supply of skills and valid hours for an employee at each time step
+        // Pre-compute supply of skills and valid hours for an employee at each time step
         batchEmployees.forEach(emp => {
-            const mySkills = (emp.skills || []).map(s => s.trim());
+            // Speed Optimization: Map strings to indices ONCE
+            const validSkillIndices = (emp.skills || [])
+                .map(s => s.trim())
+                .map(s => skillNames.indexOf(s))
+                .filter(idx => idx !== -1);
+
             for (let d = 0; d < 7; d++) {
                 const avail = emp.availability[d] || [];
                 avail.forEach(h => {
                     const t = d * 24 + h;
-                    mySkills.forEach(s => {
-                        const sIdx = skillNames.indexOf(s);
-                        if (sIdx !== -1) skillSupplyAtT[t][sIdx] += 1;
+                    validSkillIndices.forEach(sIdx => {
+                        skillSupplyAtT[t][sIdx] += 1;
                     });
                 });
             }
@@ -282,14 +386,21 @@ async function solveSchedulingMILP(params) {
         let objTerms = [];
         // Tracker to link employee variables to demand constraints
         const demandConstraintLHS = Array.from({ length: 168 }, () => skillNames.map(() => []));
+
         // Employee Constraints
         batchEmployees.forEach((emp, eIdx) => {
             const minH = parseFloat(emp.minHrs) || 0;
             const maxH = parseFloat(emp.maxHrs) || 40;
             const baseWage = parseFloat(emp.pay) || 20;
-            let empAllY = [];           // All Hours worked in Week
-            let empDailyActive = [];    // All Active Days in Week
+            let empAllY = [];
+            let empDailyActive = [];
             let totalAvailableHours = 0;
+
+            // Speed Optimization: Map strings to indices ONCE for the loops below
+            const validSkillIndices = (emp.skills || [])
+                .map(s => s.trim())
+                .map(s => skillNames.indexOf(s))
+                .filter(idx => idx !== -1);
 
             // --------------------------------------------------------------------
             // VARIABLE DEFINITIONS
@@ -300,6 +411,7 @@ async function solveSchedulingMILP(params) {
              */
             binaries.add(`u_${eIdx}`);
             continuous.push(`reg_${eIdx}`, `ot_${eIdx}`);
+
             /* Objective Penalty Weights
              * CONTIGUITY_PENALTY: Penalty for missing hours in contiguous time slots
              * This is penalized slightly higher than bas wages, incentivizing filling
@@ -314,10 +426,13 @@ async function solveSchedulingMILP(params) {
              * helps reduce 'ties' and helps trim the Branch and Bound search space.
              */
             const symmetryBreak = (eIdx / batchEmployees.length) * 0.001;
+
+            // Effective wage tricks the solver into keeping highly utilized employees from Stage 2
             const effectiveWage = baseWage - symmetryBreak;
             const otWage = isRelaxed ? (effectiveWage * 50) : (effectiveWage * 1.5);
             const CONTIGUITY_PENALTY = 25;
             const BLOCK_PENALTY = 300;
+
             objTerms.push(`${fmt(effectiveWage)} reg_${eIdx}`);
             objTerms.push(`${fmt(otWage)} ot_${eIdx}`);
 
@@ -365,15 +480,14 @@ async function solveSchedulingMILP(params) {
                 let dayY = [];
                 let dayBlocks = [];
                 let lastHour = -1;
+
                 // --- Hourly Logic Constraints ---
                 avail.forEach((h) => {
                     const t = d * 24 + h;
-                    const mySkills = (emp.skills || []).map(s => s.trim());
                     let canCoverDemand = false;
 
-                    mySkills.forEach(s => {
-                        const sIdx = skillNames.indexOf(s);
-                        if (sIdx !== -1 && skillDemandAtT[t][sIdx] > 0) canCoverDemand = true;
+                    validSkillIndices.forEach(sIdx => {
+                        if (skillDemandAtT[t][sIdx] > 0) canCoverDemand = true;
                     });
 
                     if (!canCoverDemand) return;
@@ -391,9 +505,8 @@ async function solveSchedulingMILP(params) {
                     objTerms.push(`-${fmt(CONTIGUITY_PENALTY)} y_${eIdx}_${t}`);
 
                     let maxScarcity = 0;
-                    mySkills.forEach(s => {
-                        const sIdx = skillNames.indexOf(s);
-                        if (sIdx !== -1 && skillDemandAtT[t][sIdx] > 0) {
+                    validSkillIndices.forEach(sIdx => {
+                        if (skillDemandAtT[t][sIdx] > 0) {
                             const ratio = skillDemandAtT[t][sIdx] / (skillSupplyAtT[t][sIdx] + 1);
                             if (ratio > maxScarcity) maxScarcity = ratio;
                         }
@@ -408,7 +521,6 @@ async function solveSchedulingMILP(params) {
                         constraints.push(`tr_${eIdx}_${t}: ${block} - ${y} + ${prevY} >= 0`);
                     }
                     lastHour = t;
-
                     // ------------------------------------------------------------
                     // CONTIGUITY "SQUEEZE" CONSTRAINTS
                     // ------------------------------------------------------------
@@ -424,15 +536,14 @@ async function solveSchedulingMILP(params) {
                     }
                     // Activation Link: If y=1, Day Active (da) MUST be 1.
                     constraints.push(` da_lk_${eIdx}_${t}: ${y} - ${da} <= 0`);
+
                     // --- Skill Assignment (w_{e,t,s}) ---
                     let validWs = [];
-                    mySkills.forEach(s => {
-                        const sIdx = skillNames.indexOf(s);
-                        if (sIdx !== -1 && skillDemandAtT[t][sIdx] > 0) {
+                    validSkillIndices.forEach(sIdx => {
+                        if (skillDemandAtT[t][sIdx] > 0) {
                             const w = `w_${eIdx}_${t}_${sIdx}`;
                             continuous.push(w);
                             validWs.push(w);
-                            // --- Skill Assignment (w_{e,t,s}) ---
                             demandConstraintLHS[t][sIdx].push(w);
                         }
                     });
@@ -461,7 +572,6 @@ async function solveSchedulingMILP(params) {
                         constraints.push(` spanub_${eIdx}_d${d}: ${endVal} - ${startVal} + ${da} - ${sumY} <=0.01`);
                     }
 
-                    // Firm blocking limits work effectively in both fractional and discrete passes
                     if (firmBlocking && dayBlocks.length > 0) {
                         constraints.push(` f_blok_${eIdx}_d${d}: ${dayBlocks.join(" + ")} - ${da} <= 0`);
                     }
@@ -474,7 +584,7 @@ async function solveSchedulingMILP(params) {
             constraints.push(` bal_${eIdx}: ${workSum} - reg_${eIdx} - ot_${eIdx} = 0`);
             // Max Hours: Regular <= Contract Max (if Scheduled)
             constraints.push(` max_${eIdx}: reg_${eIdx} - ${fmt(maxH)} u_${eIdx} <= 0`);
-            // Min Hours: Regular + OT + Slack >= Contract Min (if Scheduled)
+
             const safeMinShift = Math.min(minH, totalAvailableHours);
             if (safeMinShift > 0) {
                 constraints.push(` minh_${eIdx}: reg_${eIdx} - ${fmt(safeMinShift)} u_${eIdx} >= 0`);
@@ -489,6 +599,7 @@ async function solveSchedulingMILP(params) {
                 constraints.push(` f_inact_${eIdx}: u_${eIdx} = 0`);
             }
         });
+
         // Demand Constraints
         validHours.forEach(t => {
             skillNames.forEach((_, sIdx) => {
@@ -504,13 +615,12 @@ async function solveSchedulingMILP(params) {
         // Headcount Constraint
         if (targetHeadcount !== null) {
             const allU = batchEmployees.map((_, i) => `u_${i}`);
-            constraints.push(` wf_cap: ${allU.join(" + ")} >= ${fmt(targetHeadcount)}`);
+            constraints.push(` wf_cap: ${allU.join(" + ")} = ${fmt(targetHeadcount)}`);
         }
 
         // ========================================================================
         // COMPILE CPLEX LP STRING
         // ========================================================================
-
         // Clean objective string
         const cleanObjective = " obj: " + objTerms.join(" + ").replace(/\+ -/g, "- ");
 
@@ -520,8 +630,6 @@ async function solveSchedulingMILP(params) {
         ];
 
         let boundsList = [];
-
-        // Explicitly format bounds as `0 <= x <= 1`
         continuous.forEach(c => {
             if (c.startsWith('da_')) {
                 boundsList.push(` 0 <= ${c} <= 1`);
@@ -529,7 +637,6 @@ async function solveSchedulingMILP(params) {
                 boundsList.push(` ${c} >= 0`);
             }
         });
-
         // Linearly Relaxed Model will treat binaries as bounded continuous variables
         if (isRelaxed) {
             Array.from(binaries).forEach(b => {
@@ -544,8 +651,8 @@ async function solveSchedulingMILP(params) {
         // Counting Variables and Constraints for Metric Logging
         const binaryCount = isRelaxed ? 0 : binaries.size;
         const contCount = isRelaxed ? continuous.length + binaries.size : continuous.length;
-        const constraintCount = constraints.length
         // Setting Parameters for Solver Execution, based on Mode
+        const constraintCount = constraints.length;
         const passType = isRelaxed ? "RELAXED" : "DISCRETE";
         const timerID = `HiGHS Solver [${passType} | Headcount: ${targetHeadcount || 'Auto'}]`;
         // For Discrete Solver, output the counts and start the timer
@@ -556,6 +663,7 @@ async function solveSchedulingMILP(params) {
             });
             console.time(timerID);
         }
+
         // Solving Execution
         const result = highsModule.solve(lpString, {
             time_limit: timeLimit,
@@ -581,13 +689,11 @@ async function solveSchedulingMILP(params) {
 
         if (relaxedResult && relaxedResult.Columns) {
             let fractionalHeadcount = 0;
-            let employeeUtilization = {};
             let baselineShifts = [];
 
             params.employees.forEach((emp, eIdx) => {
                 const u = relaxedResult.Columns[`u_${eIdx}`]?.Primal || 0;
                 fractionalHeadcount += u;
-                employeeUtilization[emp.id] = u;
 
                 // --- EXTRACT DAILY SHIFT PROFILES ---
                 for (let d = 0; d < 7; d++) {
@@ -612,7 +718,7 @@ async function solveSchedulingMILP(params) {
                 }
             });
 
-            return { status: 'Optimal', result: { fractionalHeadcount, employeeUtilization, baselineShifts } };
+            return { status: 'Optimal', result: { fractionalHeadcount, baselineShifts } };
         } else {
             return { status: 'Error', error: 'Relaxed simulation failed or timed out.' };
         }
@@ -636,7 +742,6 @@ async function solveSchedulingMILP(params) {
         return batchEmployees.map((emp, eIdx) => {
             let schedule = Array(168).fill(null);
 
-            // Check if employee was selected
             const isSelected = (resultColumns[`u_${eIdx}`]?.Primal || 0) > 0.5;
 
             if (isSelected) {
@@ -672,13 +777,13 @@ async function solveSchedulingMILP(params) {
         let scheduledTotal = 0;
         let tWages = 0;
         let tOT = 0;
+
         smoothedRoster.forEach(e => {
             tWages += (e.regHrs * e.pay);
             tOT += (e.otHrs * e.pay * 1.5);
             if (e.regHrs > 0) scheduledTotal++;
         });
 
-        // Return Solver Results to Console
         console.log("%c--- SOLVER COMPLETE ---", "color: green; font-weight: bold;");
         console.table({
             "Total Scheduled": scheduledTotal,
@@ -686,7 +791,6 @@ async function solveSchedulingMILP(params) {
             "Actual Cost": `$${(tWages + tOT).toFixed(2)}`
         });
 
-        // Return Solver Results to UI
         return {
             status: 'Optimal',
             result: {
@@ -706,12 +810,12 @@ self.onmessage = async function (e) {
     const { type, data } = e.data;
     if (type === 'solve') {
         try {
-            const memAlloc = data.mode === 'stochasticFractional' ? (256 * 1024 * 1024) : (2048 * 1024 * 1024);
+            // Maximum safe allocation is just under 2GB to prevent native browser engine crashes.
+            const memAlloc = data.mode === 'stochasticFractional' ? (256 * 1024 * 1024) : (2000 * 1024 * 1024);
             await initHighs(memAlloc);
             const output = await solveSchedulingMILP(data);
             self.postMessage({ type: 'result', ...output });
         } catch (error) {
-            // Catch fatal WASM aborts and notify the main thread
             console.error("Worker Caught Fatal Error:", error);
             self.postMessage({ type: 'crash', error: error.toString() });
         }
