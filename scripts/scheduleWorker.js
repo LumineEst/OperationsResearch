@@ -12,7 +12,11 @@
  * Blocking is incentivized within the objective function, and not as a direct
  * constraint; which means that tighter schedules may result in a loosening of
  * the blocking behavior to meet constraints. A smoothing Heuristic is used to
- * reallocate skill assignments to balance overstaffing of skill-groups.
+ * reallocate skill assignments to balance overstaffing of skill-groups, and to
+ * minimize unnecessary skill assignment changes.  The solver has an alternative
+ * linear relaxation mode, which will treat binaries as bound continuous variables.
+ * This is intended to be used within a monte-carlo simulation, in which speed
+ * is preferred over discrete accuracy.
  * CPLEX Formatting: http://web.mit.edu/lpsolve/doc/CPLEX-format.htm
  * HiGHs Controls: https://dev.ampl.com/solvers/highs/options.html
  * * @author Joel Wood
@@ -52,28 +56,27 @@ async function initHighs(memoryBytes) {
  */
 function fmt(num) {
     const n = parseFloat(num);
-    return (!Number.isFinite(n) || Math.abs(n) < 1e-8) ? "0" : n.toFixed(4);
+    return (!Number.isFinite(n) || Math.abs(n) < 1e-8) ? "0" : n.toFixed(6);
 }
 
-/**
+/**============================================================================
+ * HIERARCHICAL DEMAND-BLOCK SMOOTHER & GLOBAL SHIFT CLUSTERING
  * ============================================================================
- * HIERARCHICAL DEMAND-BLOCK SMOOTHER (Tree Decomposition)
- * ============================================================================
- * Decomposes daily demand into a stack of contiguous requirement blocks.
- * Employs Dynamic Stress Updating, Volumetric Sorting (Stress * Duration),
- * and Block Slicing (Maximal Sub-Interval Matching) to geometrically pack
- * shifts using the least flexible employees first.
+ * Decomposes daily demand into geometric blocks, packing them using dynamic
+ * stress metrics. Concludes with a global 168-hour pass that swaps around
+ * surplus 1-hour shifts across the week to dock with existing schedules.
  */
 function smoothSkillAllocation(rawRoster, demands, skillNames) {
     const finalRoster = JSON.parse(JSON.stringify(rawRoster));
-
     const getFlexibility = (emp) => (emp.skills || []).filter(s => skillNames.includes(s)).length;
 
-    // Process each day completely independently to isolate block interactions
+    // ========================================================================
+    // DAILY BLOCK-PACKING PASS
+    // ========================================================================
     for (let d = 0; d < 7; d++) {
         const startT = d * 24;
 
-        // 1. ISOLATE DAILY ACTIVE WORKFORCE
+        // Isolate daily workforce availability
         const activeEmps = [];
         finalRoster.forEach((emp, eIdx) => {
             let working = Array(24).fill(false);
@@ -84,7 +87,7 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
                 if (emp.schedule[startT + h] !== null) {
                     isWorkingToday = true;
                     working[h] = true;
-                    emp.schedule[startT + h] = null; // Clear the raw MILP skill assignments
+                    emp.schedule[startT + h] = null;
                 }
             }
             if (isWorkingToday) {
@@ -92,7 +95,7 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
             }
         });
 
-        // 2. ISOLATE DAILY DEMAND (Mutable and Immutable copies)
+        // Isolate daily demand
         const dailyDemand = Array.from({ length: 24 }, () => ({}));
         const originalDailyDemand = Array.from({ length: 24 }, () => ({}));
         demands.filter(dem => dem.day === d).forEach(dem => {
@@ -103,7 +106,7 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
             });
         });
 
-        // 3. INITIAL DEMAND DECOMPOSITION (The Tree / Stack)
+        // Deconstruct demand into a tree of skill blocks
         let demandBlocks = [];
         skillNames.forEach(skill => {
             let currentProfile = dailyDemand.map(h => h[skill] || 0);
@@ -113,25 +116,22 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
                 let endHour = startHour;
 
                 while (endHour < 24 && currentProfile[endHour] > 0) endHour++;
-                endHour--; // Step back to the last valid contiguous hour
+                endHour--;
 
                 let minDemand = Math.min(...currentProfile.slice(startHour, endHour + 1));
 
-                // Create identical blocks for the width of the demand floor
                 for (let i = 0; i < minDemand; i++) {
                     demandBlocks.push({ skill, start: startHour, end: endHour });
                 }
 
-                // Shave off the root, leaving the peaks (children) for the next iteration
                 for (let h = startHour; h <= endHour; h++) {
                     currentProfile[h] -= minDemand;
                 }
             }
         });
 
-        // 4. DYNAMIC GREEDY ASSIGNMENT LOOP
+        // Assign each skill block to an employee based on stress (volume of skill demand to supply)
         while (demandBlocks.length > 0) {
-            // A. Dynamic Stress Calculation (Updates every loop as employees are consumed)
             const capableSupply = Array.from({ length: 24 }, () => ({}));
             for (let h = 0; h < 24; h++) {
                 skillNames.forEach(s => {
@@ -139,30 +139,27 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
                 });
             }
 
-            // B. Volumetric Sorting (Total Stress = Avg Stress * Duration)
             demandBlocks.forEach(b => {
                 let totalStress = 0;
                 for (let h = b.start; h <= b.end; h++) {
                     const req = dailyDemand[h][b.skill] || 0;
                     if (req === 0) continue;
                     const supply = capableSupply[h][b.skill] || 0;
-                    totalStress += supply > 0 ? (req / supply) : 9999; // Massive penalty if impossible
+                    totalStress += supply > 0 ? (req / supply) : 9999;
                 }
                 b.volume = totalStress;
             });
 
-            // Sort so the hardest, longest blocks are always popped first
             demandBlocks.sort((a, b) => b.volume - a.volume);
             const block = demandBlocks.shift();
 
-            if (block.volume === 0) continue; // Demand was already zeroed out
+            if (block.volume === 0) continue;
 
-            // C. Block Slicing / Sub-Interval Matching
             let bestEmp = null;
             let bestMatchStart = -1;
             let bestMatchEnd = -1;
             let maxOverlap = 0;
-            let bestFlex = 999; // Lower is better (protect generalists)
+            let bestFlex = 999;
 
             activeEmps.forEach(emp => {
                 if (!emp.skills.includes(block.skill)) return;
@@ -204,15 +201,12 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
                 }
             });
 
-            // D. Execution & Geometric Slicing
             if (bestEmp) {
-                // Lock the employee in
                 for (let h = bestMatchStart; h <= bestMatchEnd; h++) {
                     bestEmp.assigned[h] = block.skill;
                     dailyDemand[h][block.skill] = Math.max(0, dailyDemand[h][block.skill] - 1);
                 }
 
-                // If they couldn't cover the whole block, slice leftovers and re-queue them
                 if (bestMatchStart > block.start) {
                     demandBlocks.push({ skill: block.skill, start: block.start, end: bestMatchStart - 1 });
                 }
@@ -222,14 +216,13 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
             }
         }
 
-        // 5. WRITE TO ROSTER & FILL SURPLUS LABOR
+        // Fill in excess skill supply after all demand is met
         activeEmps.forEach(e => {
             for (let h = 0; h < 24; h++) {
                 if (e.working[h]) {
                     if (e.assigned[h] !== null) {
                         finalRoster[e.idx].schedule[startT + h] = e.assigned[h];
                     } else {
-                        // Surplus labor gets filled with their most common/valid skill
                         const validSkills = e.skills.filter(s => skillNames.includes(s));
                         finalRoster[e.idx].schedule[startT + h] = validSkills[0] || skillNames[0];
                     }
@@ -237,7 +230,7 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
             }
         });
 
-        // 6. DEMAND SWAP PASS (Fix shortages by stealing from surplus skills)
+        // Swap surplus skills across the week based on volumetric demand stress
         for (let h = 0; h < 24; h++) {
             const t = startT + h;
             skillNames.forEach(skill => {
@@ -251,9 +244,8 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
                         e.skills.includes(skill)
                     );
 
-                    if (potentialSwaps.length === 0) break; // Mathematically impossible to fix
+                    if (potentialSwaps.length === 0) break;
 
-                    // Sort to steal from the role with the highest over-staffing surplus
                     potentialSwaps.sort((a, b) => {
                         let skillA = finalRoster[a.idx].schedule[t];
                         let skillB = finalRoster[b.idx].schedule[t];
@@ -268,7 +260,7 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
             });
         }
 
-        // 7. EMPLOYEE CONTIGUITY SWAP PASS (Iron out the boundaries)
+        // Swap excess skills to be contiguous to existing shifts
         for (let h = 1; h < 23; h++) {
             const t = startT + h;
             const empsAtT = activeEmps.filter(e => finalRoster[e.idx].schedule[t] !== null);
@@ -302,8 +294,88 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
         }
     }
 
+    // ========================================================================
+    // GLOBAL ORPHAN SHIFT RELOCATION PASS (Strict 1-Hour Blocks Only)
+    // ========================================================================
+    // Scans the entire 168-hour week exactly ONCE. Moving isolated, surplus
+    // 1-hour shifts across days to dock them to the employee's existing shifts.
+    const weekDemand = Array.from({ length: 168 }, () => ({}));
+    demands.forEach(dem => {
+        const t = dem.day * 24 + dem.hour;
+        skillNames.forEach(s => weekDemand[t][s] = parseFloat(dem[s]) || 0);
+    });
+
+    for (let eIdx = 0; eIdx < finalRoster.length; eIdx++) {
+        const emp = rawRoster[eIdx];
+
+        for (let t = 0; t < 168; t++) {
+            const currentSkill = finalRoster[eIdx].schedule[t];
+            if (currentSkill === null) continue;
+
+            const dayOfT = Math.floor(t / 24);
+
+            // Check for orphaned shifts, where no hours are scheduled before or after a 1-hour block
+            const prevWorking = (t > 0 && Math.floor((t - 1) / 24) === dayOfT) ? finalRoster[eIdx].schedule[t - 1] !== null : false;
+            const nextWorking = (t < 167 && Math.floor((t + 1) / 24) === dayOfT) ? finalRoster[eIdx].schedule[t + 1] !== null : false;
+
+            // Check if the shift is orphaned
+            if (!prevWorking && !nextWorking) {
+                const req = weekDemand[t][currentSkill] || 0;
+                const actual = finalRoster.filter(e => e.schedule[t] === currentSkill).length;
+                // Check if the demand is still met if the shift is moved
+                if (actual > req) {
+                    let candidates = [];
+                    // Scan for a docking point
+                    for (let candT = 0; candT < 168; candT++) {
+                        if (candT === t) continue;
+                        const candD = Math.floor(candT / 24);
+                        const candH = candT % 24;
+                        // Look for an unscheduled block of time, and if that block is in their availability
+                        if (finalRoster[eIdx].schedule[candT] !== null) continue;
+                        const avail = emp.availability && emp.availability[candD] ? emp.availability[candD].map(Number) : [];
+                        if (avail.length > 0 && !avail.includes(candH)) continue;
+                        // Check that the skill is adjacent to an existing shift
+                        let adjSkills = [];
+                        const candPrevT = candT - 1;
+                        const candNextT = candT + 1;
+                        if (candPrevT >= 0 && Math.floor(candPrevT / 24) === candD && candPrevT !== t && finalRoster[eIdx].schedule[candPrevT] !== null) {
+                            adjSkills.push(finalRoster[eIdx].schedule[candPrevT]);
+                        }
+                        if (candNextT <= 167 && Math.floor(candNextT / 24) === candD && candNextT !== t && finalRoster[eIdx].schedule[candNextT] !== null) {
+                            adjSkills.push(finalRoster[eIdx].schedule[candNextT]);
+                        }
+                        if (adjSkills.length > 0) {
+                            adjSkills.forEach(targetSkill => {
+                                const candReq = weekDemand[candT][targetSkill] || 0;
+                                const candActual = finalRoster.filter(e => e.schedule[candT] === targetSkill).length;
+                                // Calculate base Stress (Demand / Current Staffing)
+                                let stress = 0;
+                                if (candReq > 0) {
+                                    stress = candActual > 0 ? (candReq / candActual) : 999;
+                                }
+                                // Give preferential weight to adjacent skills
+                                if (targetSkill === adjSkills[0] || targetSkill === adjSkills[1]) {
+                                    stress += 1000;
+                                }
+                                candidates.push({ t: candT, skill: targetSkill, stress: stress });
+                            });
+                        }
+                    }
+                    // Execute the isolated 1-for-1 move
+                    if (candidates.length > 0) {
+                        // Sort descending by stress to prioritize skill contiguity and critical demand
+                        candidates.sort((a, b) => b.stress - a.stress);
+                        const bestMove = candidates[0];
+                        finalRoster[eIdx].schedule[t] = null; // Erase the orphaned hour
+                        finalRoster[eIdx].schedule[bestMove.t] = bestMove.skill; // Reassign to anchor
+                    }
+                }
+            }
+        }
+    }
     return finalRoster;
 }
+
 
 // ============================================================================
 // BUILD LP STRING & SOLVE
@@ -325,7 +397,7 @@ function smoothSkillAllocation(rawRoster, demands, skillNames) {
  * @returns {Array} The smoothed roster.
  */
 async function solveSchedulingMILP(params) {
-    const { employees, demands, preferredEmployees, timeLimit = 20 } = params;
+    const { employees, demands, preferredEmployees, timeLimit = 30 } = params;
     const skillNames = ["Cashiers", "Stocking", "Customer Service", "BackRoom", "Floor Associate"];
     const TIME_LIMIT = timeLimit;
     let targetCount = parseInt(preferredEmployees) || employees.length;
@@ -421,14 +493,10 @@ async function solveSchedulingMILP(params) {
              * The longest span for such a gap is 9 hours, so this is 12 times greater
              * than CONTIGUITY_PENALTY to prevent many gaps being formed to reduce total
              * interior unscheduled hours in shifts.
-             * symmetryBreak: A fractional adjustment of the basewage of employees to
-             * disrupt the symmetry of the problem. and help for rapid convergence.  This
-             * helps reduce 'ties' and helps trim the Branch and Bound search space.
              */
-            const symmetryBreak = (eIdx / batchEmployees.length) * 0.001;
 
-            // Effective wage tricks the solver into keeping highly utilized employees from Stage 2
-            const effectiveWage = baseWage - symmetryBreak;
+            // Effective wage is slightly perturbed to help allow wage-based symmetry breaks
+            const effectiveWage = baseWage - ((eIdx / batchEmployees.length) * 0.001);
             const otWage = isRelaxed ? (effectiveWage * 50) : (effectiveWage * 1.5);
             const CONTIGUITY_PENALTY = 25;
             const BLOCK_PENALTY = 300;
@@ -471,6 +539,7 @@ async function solveSchedulingMILP(params) {
                     /* If da=0 (Not working), force Start and End to 0.
                      * If da=1 (Working), Start must be >= Earliest, End <= Latest.
                      * Mathematical Form: Start - (Earliest * da) >= 0
+                     * End - (Latestest * da) <= 0; Start - 24 * da <= 0
                      */
                     constraints.push(` b_min_${eIdx}_d${d}: ${startVal} - ${earliest} ${da} >= 0`);
                     constraints.push(` b_max_${eIdx}_d${d}: ${endVal} - ${latest} ${da} <= 0`);
@@ -491,7 +560,6 @@ async function solveSchedulingMILP(params) {
                     });
 
                     if (!canCoverDemand) return;
-
                     const y = `y_${eIdx}_${t}`;
                     const block = `blok_${eIdx}_${t}`;
 
@@ -670,6 +738,7 @@ async function solveSchedulingMILP(params) {
             presolve: 'on',
             mip_rel_gap: isRelaxed ? 0.01 : 0.05
         });
+
         // For Discrete Solver, output the solve time.
         if (!quiet) console.timeEnd(timerID);
         return result;
@@ -681,7 +750,7 @@ async function solveSchedulingMILP(params) {
     if (params.mode === 'stochasticFractional') {
         const relaxedResult = runSolverPass(params.employees, {
             targetHeadcount: null,
-            timeLimit: 60,
+            timeLimit: 90,
             isRelaxed: true,
             firmBlocking: true,
             quiet: true
@@ -760,6 +829,7 @@ async function solveSchedulingMILP(params) {
             }
             return {
                 id: emp.id, skills: emp.skills, pay: parseFloat(emp.pay) || 15,
+                availability: emp.availability,
                 schedule,
                 regHrs: resultColumns[`reg_${eIdx}`]?.Primal || 0,
                 otHrs: resultColumns[`ot_${eIdx}`]?.Primal || 0,

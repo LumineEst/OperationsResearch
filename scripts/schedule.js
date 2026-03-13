@@ -121,7 +121,7 @@ window.ScheduleModule = {
         if (window.resetGlobalKPI) window.resetGlobalKPI();
 
         // Restart the global solver countdown, and render the solver dashboard
-        window.schedState.solverTimeLeft = parseInt(document.getElementById('timerLimit')?.value * 60) || 900;
+        window.schedState.solverTimeLeft = parseInt(document.getElementById('timerLimit')?.value * 60) || 1800;
 
         this.startGlobalTicker();
         this.renderSolverDashboard();
@@ -1210,10 +1210,11 @@ window.ScheduleModule = {
     }
 };
 
-/**
- * Manages a pool of Web Workers to execute parallel Monte Carlo simulations.
+/**Manages a pool of Web Workers to execute parallel Monte Carlo simulations.
  * specifically, it uses a Web Worker to solve a stochastic fractional problem
- * on continuously relaxed MILP scheduling problems.
+ * on continuously relaxed MILP scheduling problems, in which an expected call-out
+ * percentage is simulated through duplicating a certain number of random shifts
+ * within the roster by increasing their respective demands.
  */
 class StochasticOptimizer {
     constructor(workerScript, numThreads = navigator.hardwareConcurrency || 4) {
