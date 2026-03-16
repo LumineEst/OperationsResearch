@@ -478,15 +478,16 @@ window.ScheduleModule = {
         this.renderIndividualGantt(emp);
     },
 
-    /**Generates training recommendations based on the active Roster.
-     * 1. CONTIGUITY GAPS (Highest): Employee has a split shift (Work -> Off -> Work).
-     * 2. CRITICAL COVERAGE: The store is understaffed, and this employee is available.
-     * 3. FLEXIBILITY: Employee is already working but could learn a new skill for that hour.
+    /**
+     * Generates training recommendations based on the active Roster and dynamic Stress.
+     * 1. BRIDGE (Highest): Employee has an internal gap (Split Shift) that can be filled.
+     * 2. EXTENSION: Adding a highly stressed hour directly adjacent to their existing shift.
+     * 3. CRITICAL: Store is severely understaffed, and they could swap roles mid-shift.
+     * 4. FLEX: General flexibility improvement for low-stress hours.
      */
     generateRecommendations(emp) {
         const recContainer = document.getElementById('trainingRecs');
         if (!recContainer) return;
-
         const results = window.schedState.results;
         const demands = window.schedState.demands;
 
@@ -494,20 +495,35 @@ window.ScheduleModule = {
             recContainer.innerHTML = `<p style="font-size:0.8rem; color:#888; font-style:italic;">Solve roster to generate recommendations.</p>`;
             return;
         }
-
         const rosterEntry = results.roster.find(r => r.id === emp.id);
         if (!rosterEntry) {
             recContainer.innerHTML = `<p style="font-size:0.8rem; color:#888;">Employee not selected for this schedule.</p>`;
             return;
         }
+        const coverageAtT = Array.from({ length: 168 }, () => ({}));
+        results.roster.forEach(e => {
+            for (let t = 0; t < 168; t++) {
+                const s = e.schedule[t];
+                if (s) coverageAtT[t][s] = (coverageAtT[t][s] || 0) + 1;
+            }
+        });
+        const demandAtT = Array.from({ length: 168 }, () => ({}));
+        demands.forEach(d => {
+            const t = d.day * 24 + d.hour;
+            this.skillNames.forEach(skill => demandAtT[t][skill] = parseFloat(d[skill]) || 0);
+        });
 
-        let gaps = [];
+        // ====================================================================
+        // SCAN FOR STRESS & GAPS
+        // ====================================================================
+        let recommendations = [];
+        const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         const color = d3.scaleOrdinal().domain(this.skillNames).range(d3.schemeCategory10);
 
-        // Iterate by Day to find Start/End times
         for (let d = 0; d < 7; d++) {
-            // Find start and end hours for this day
             let startH = -1, endH = -1;
+
+            // Find boundaries of today's shift
             for (let h = 0; h < 24; h++) {
                 if (rosterEntry.schedule[d * 24 + h] !== null) {
                     if (startH === -1) startH = h;
@@ -515,66 +531,83 @@ window.ScheduleModule = {
                 }
             }
 
-            if (startH === -1) continue;  // If no shift today, skip
-            // Now scan ONLY between startH and endH for gaps
-            for (let h = startH; h <= endH; h++) {
-                const t = d * 24 + h;
-                const isGap = (rosterEntry.schedule[t] === null);
+            if (startH === -1) continue; // Skip days they aren't working
 
-                // Also check availability/demand for this specific hour
-                if (!emp.availability[d].includes(h)) continue;
-                const hourDem = demands.find(dem => dem.day === d && dem.hour === h);
-                if (!hourDem) continue;
+            // Expand scan window to include immediate adjacent hours for "Extensions"
+            const scanStart = Math.max(0, startH - 1);
+            const scanEnd = Math.min(23, endH + 1);
+
+            for (let h = scanStart; h <= scanEnd; h++) {
+                const t = d * 24 + h;
+
+                // Must be within the employee's legal availability
+                if (!emp.availability[d] || !emp.availability[d].includes(h)) continue;
+
+                const isInternalGap = (h > startH && h < endH && rosterEntry.schedule[t] === null);
+                const isExtension = ((h === startH - 1 || h === endH + 1) && rosterEntry.schedule[t] === null);
+                const isCurrentlyWorking = (rosterEntry.schedule[t] !== null);
 
                 this.skillNames.forEach(skill => {
-                    const req = hourDem[skill] || 0;
-                    if (req === 0) return;
-                    if (emp.skills.includes(skill)) return;
+                    const req = demandAtT[t][skill] || 0;
+                    if (req === 0) return; // Ignore skills the store doesn't need right now
+                    if (emp.skills.includes(skill)) return; // Ignore skills they already know
 
-                    // Calculate Net Coverage
-                    const scheduledCount = results.roster.filter(e => e.schedule[t] === skill).length;
-                    const buffer = scheduledCount - req;
+                    const actual = coverageAtT[t][skill] || 0;
+                    // TRUE STRESS METRIC: Demand / Actual (Caps at 10x if actual is 0 to prevent Infinity)
+                    const stress = actual > 0 ? (req / actual) : (req * 10);
 
-                    // SCORING LOGIC
                     let type = '';
                     let score = 0;
 
-                    // PRIORITY 1: INTERNAL GAP (Split Shift Fix)
-                    if (isGap) {
+                    // PRIORITY 1: INTERNAL GAP (Bridge a split shift)
+                    if (isInternalGap) {
                         type = 'BRIDGE';
-                        score = 10000 - buffer; // Massive priority
+                        score = 20000 * stress;
                     }
-                    // PRIORITY 2: CRITICAL COVERAGE (If not a gap, but store needs help)
-                    else if (buffer < 0) {
+                    // PRIORITY 2: SHIFT EXTENSION (Highly stressed adjacent hour)
+                    else if (isExtension && stress > 1.0) {
+                        type = 'EXTENSION';
+                        score = 2000 * stress;
+                    }
+                    // PRIORITY 3: CRITICAL COVERAGE (Swap roles mid-shift to save a failing department)
+                    else if (isCurrentlyWorking && stress > 1.0) {
                         type = 'CRITICAL';
-                        score = 1000 - buffer;
+                        score = 1000 * stress;
                     }
-                    // PRIORITY 3: FLEXIBILITY (Already working)
-                    else if (rosterEntry.schedule[t] !== null && buffer < 1) {
+                    // PRIORITY 4: FLEXIBILITY (Low stress improvement)
+                    else if (isCurrentlyWorking && (actual - req) < 2) {
                         type = 'FLEX';
-                        score = 10 - buffer;
+                        score = 10 * stress;
                     }
 
                     if (type) {
-                        gaps.push({ skill, day: d, hour: h, buffer, type, score });
+                        recommendations.push({ skill, day: d, hour: h, stress, type, score });
                     }
                 });
             }
         }
 
-        // Sort by Score and take top 3
-        const topRecs = gaps.sort((a, b) => b.score - a.score).slice(0, 3);
+        // ====================================================================
+        // DEDUPLICATE & RENDER
+        // ====================================================================
+        // If "Cashier" is recommended 5 times, only show the instance with the highest stress
+        const uniqueRecs = {};
+        recommendations.forEach(r => {
+            if (!uniqueRecs[r.skill] || uniqueRecs[r.skill].score < r.score) {
+                uniqueRecs[r.skill] = r;
+            }
+        });
 
+        const topRecs = Object.values(uniqueRecs).sort((a, b) => b.score - a.score).slice(0, 3);
         let html = `<h4 style="margin:0 0 10px 0; font-size:0.85rem; color:var(--secondary);">Training Opportunities</h4>`;
-
         if (topRecs.length === 0) {
-            html += `<p style="font-size:0.75rem; color:#666;">No internal gaps or high-priority training needs found.</p>`;
+            html += `<p style="font-size:0.75rem; color:#666;">No high-priority training needs found based on current schedule.</p>`;
         } else {
             topRecs.forEach(r => {
                 let badgeColor = "#2980b9";
                 let label = "Flexibility";
-
                 if (r.type === 'BRIDGE') { badgeColor = "#8e44ad"; label = "Fill Internal Gap"; }
+                else if (r.type === 'EXTENSION') { badgeColor = "#f39c12"; label = "Shift Extension"; }
                 else if (r.type === 'CRITICAL') { badgeColor = "#e74c3c"; label = "Coverage Gap"; }
 
                 html += `
@@ -584,7 +617,7 @@ window.ScheduleModule = {
                         <span style="font-size:0.6rem; background:${badgeColor}; color:#fff; padding:1px 4px; border-radius:3px; text-transform:uppercase;">${label}</span>
                     </div>
                     <div style="color:#555; margin-top:2px;">
-                        ${days[r.day]} @ ${r.hour}:00
+                        Highest Impact: ${days[r.day]} @ ${r.hour}:00
                     </div>
                 </div>`;
             });
@@ -635,7 +668,7 @@ window.ScheduleModule = {
             const masterEmployees = JSON.parse(JSON.stringify(window.schedState.employees));
             const demands = JSON.parse(JSON.stringify(window.schedState.demands));
 
-            // --- STAGE 1: BASELINE SOLVE ---
+            // --- BASELINE SOLVE ---
             const baselineParams = { employees: masterEmployees, demands, mode: 'stochasticFractional' };
             const baselineData = await new Promise((resolve, reject) => {
                 const w = new Worker('scripts/scheduleWorker.js');
@@ -654,7 +687,7 @@ window.ScheduleModule = {
                 w.postMessage({ type: 'solve', data: baselineParams });
             });
 
-            // --- STAGE 2: FULL-SHIFT DEMAND INFLATION ---
+            // --- DEMAND INFLATION ---
             const baselineShifts = baselineData.baselineShifts || [];
             const totalShifts = baselineShifts.length;
             const callOutShiftsTarget = Math.round(totalShifts * callOutRate);
@@ -706,7 +739,7 @@ window.ScheduleModule = {
                     </div>`;
             }
 
-            // --- STAGE 3: RUN MONTE CARLO ---
+            // --- RUN MONTE CARLO ---
             this.stochasticPool = new StochasticOptimizer('scripts/scheduleWorker.js');
             const simResults = await this.stochasticPool.runMonteCarlo(masterEmployees, simulationDemands);
 
@@ -733,7 +766,7 @@ window.ScheduleModule = {
             console.log(`%c • Final Discrete Target: ${finalDiscreteTarget} Employees`, "color: green; font-weight: bold; font-size: 1.1em;");
             console.groupEnd();
 
-            // --- STAGE 4: DISCRETE MILP ---
+            // --- DISCRETE MILP ---
             if (statusContainer) {
                 statusContainer.innerHTML = `
                     <div class="solver-dashboard">
