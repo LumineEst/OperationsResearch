@@ -166,6 +166,7 @@ function evaluatePolicy(R, TargetLevel_Q) {
 
             // Sales vs Shortage Calculation
             let sold = 0;
+            let specialOrder = 0;
             let shortage = 0;
 
             if (demand <= startInv) {
