@@ -139,9 +139,13 @@ function evaluatePolicy(R, TargetLevel_Q) {
     const pi = solveSteadyState(P);
 
     // --- CALCULATE EV (EXPECTED VALUE) ---
-    // E[X] = Σ (Value(state) * Probability(state))
-    let totalRevenue = 0, totalOrder = 0, totalHolding = 0, totalShortage = 0;
+    // This is independent of the Markov Chain's Steady State
+    let expectedRevenue = 0, totalOrder = 0, totalHolding = 0, totalShortage = 0;
+    CONFIG.DEMAND_DIST.forEach(d => {
+        expectedRevenue += (d.prob * d.qty * CONFIG.PRICE_PER_TRUCK);
+    });
 
+    const shortageCost = CONFIG.COST_PER_TRUCK + CONFIG.SHORTAGE_COST_TOTAL;
     for (let i = 0; i < nStates; i++) {
         const probState = pi[i];
         if (probState < 1e-9) continue; // Skip negligible probabilities
@@ -164,41 +168,22 @@ function evaluatePolicy(R, TargetLevel_Q) {
             // The joint probability of being in State i AND having Demand d
             const combinedProb = probState * probDemand;
 
-            // Sales vs Shortage Calculation
-            let sold = 0;
-            let specialOrder = 0;
-            let shortage = 0;
-
-            if (demand <= startInv) {
-                // Fully met demand
-                sold = demand;
-            } else {
-                // Stockout scenario: Sell everything, record shortage
-                sold = startInv;
-                specialOrder = demand - startInv;
-            }
+            const shortageQty = Math.max(0, demand - startInv);
+            const holdingQty = Math.max(0, startInv - demand);
 
             // Accumulate Weighted Costs
-            totalRevenue += (demand * CONFIG.PRICE_PER_TRUCK) * combinedProb;
-            totalShortage += (shortage * CONFIG.SHORTAGE_COST_TOTAL) * combinedProb;
-            totalOrder += (specialOrder * CONFIG.COST_PER_TRUCK) * combinedProb;
-
-            // End of Week Inventory (Basis for Holding Cost)
-            const endInv = Math.max(0, startInv - demand);
-            totalHolding += (endInv * CONFIG.HOLDING_COST) * combinedProb;
-
-            
-
+            totalShortage += (shortageQty * shortageCost) * combinedProb;
+            totalHolding += (holdingQty * CONFIG.HOLDING_COST) * combinedProb;
         });
     }
 
     return {
         R,
         Q: TargetLevel_Q,
-        totalProfit: totalRevenue - totalOrder - totalHolding - totalShortage,
+        totalProfit: expectedRevenue - totalOrder - totalHolding - totalShortage,
         steadyState: pi, // Required for Steady State Chart
         details: {
-            expectedRevenue: totalRevenue,
+            expectedRevenue: expectedRevenue,
             expectedOrderCost: totalOrder,
             expectedHoldingCost: totalHolding,
             expectedShortageCost: totalShortage

@@ -680,8 +680,9 @@ window.OrdersModule = {
 
         // Create a color scale (a function that maps a value to a color)
         const color = d3.scaleLinear()
-            .domain([minP, 0, maxP * 0.85, maxP]) // Define the mapping between values and colors
+            .domain([0, maxP * 0.8, maxP * 0.95, maxP]) // Define the mapping between values and colors
             .range(["#4a4a4a", "#f7f7f7", "#5dc9b6", "#1e3799"]) // Define the colors for each value
+            .clamp(true)
             .interpolate(d3.interpolateHcl); // Use a specific interpolation method
 
         // Calculate the unique Target Levels and Reorder Points used in allData
