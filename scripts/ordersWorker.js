@@ -174,16 +174,20 @@ function evaluatePolicy(R, TargetLevel_Q) {
             } else {
                 // Stockout scenario: Sell everything, record shortage
                 sold = startInv;
-                shortage = demand - startInv;
+                specialOrder = demand - startInv;
             }
+
+            // Accumulate Weighted Costs
+            totalRevenue += (demand * CONFIG.PRICE_PER_TRUCK) * combinedProb;
+            totalShortage += (shortage * CONFIG.SHORTAGE_COST_TOTAL) * combinedProb;
+            totalOrder += (specialOrder * CONFIG.COST_PER_TRUCK) * combinedProb;
 
             // End of Week Inventory (Basis for Holding Cost)
             const endInv = Math.max(0, startInv - demand);
-
-            // Accumulate Weighted Costs
-            totalRevenue += (sold * CONFIG.PRICE_PER_TRUCK) * combinedProb;
-            totalShortage += (shortage * CONFIG.SHORTAGE_COST_TOTAL) * combinedProb;
             totalHolding += (endInv * CONFIG.HOLDING_COST) * combinedProb;
+
+            
+
         });
     }
 
